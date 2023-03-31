@@ -2,14 +2,17 @@
 
 # PSQL: a piped SQL dialect for DuckDB
 
-PSQL is a piped SQL dialect for DuckDB. The idea is to combine extend SQL with a pipe syntax to write simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) or [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), and provides the full power of DuckDB's SQL.
+PSQL is a piped SQL dialect for DuckDB. The idea is to extend SQL with a pipe syntax to write simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) or [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), and provides the full power of DuckDB's SQL.
 
 PSQL allows you to write SQL queries in a more natural way:
 
 ```sql
 from invoices |
 where invoice_date >= today() - interval 30 day |
-select customer_id, avg(total) as avg_spend group by all |
+select
+  customer_id,
+  avg(total) as avg_spend
+  group by all |
 where avg_spend > 20
 ```
 
