@@ -69,7 +69,7 @@ WITH _tmp1 AS (A),
 FROM _tmp3 D
 ```
 
-# Limitations
+## Limitations
 
 This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex replacement), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
 
