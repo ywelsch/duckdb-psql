@@ -27,7 +27,8 @@ join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/custome
     as customers
   on invoices.customer_id = customers.customer_id |
 select
-  customer_id, last_name || ', ' || first_name as name, 
+  customer_id,
+  last_name || ', ' || first_name as name,
   sum_income,
   version() as db_version;
 ```
