@@ -12,6 +12,9 @@ add_library(${EXTENSION_NAME} STATIC ${EXTENSION_SOURCES})
 set(PARAMETERS "-warnings")
 build_loadable_extension(${TARGET_NAME} ${PARAMETERS} ${EXTENSION_SOURCES})
 
+target_link_libraries(${EXTENSION_NAME} duckdb_re2)
+target_link_libraries(${TARGET_NAME}_loadable_extension duckdb_re2)
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"
