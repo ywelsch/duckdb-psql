@@ -7,7 +7,7 @@ PSQL is a piped SQL dialect for DuckDB. The idea is to extend SQL with a pipe sy
 PSQL allows you to write SQL queries in a more natural way:
 
 ```sql
-from invoices |
+from 'http://example.com/invoices' |
 where invoice_date >= today() - interval 30 day |
 select
   customer_id,
@@ -33,27 +33,23 @@ FROM _tmp3 D
 
 # Limitations
 
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages.
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
 
 ## Running the DuckDB extension
 
 For installation instructions, see further below. After installing the extension, you can directly query DuckDB using PSQL, the Piped SQL. Both PSQL and regular SQL commands are supported within the same shell.
 
-We use regular DuckDB SQL for defining our tables:
+We first load the `httpfs` extension to access remote data:
 
 ```sql
 INSTALL httpfs;
 LOAD httpfs;
-CREATE TABLE invoices AS SELECT * FROM
-  read_csv_auto('https://raw.githubusercontent.com/PRQL/prql/main/prql-compiler/tests/integration/data/chinook/invoices.csv');
-CREATE TABLE customers AS SELECT * FROM
-  read_csv_auto('https://raw.githubusercontent.com/PRQL/prql/main/prql-compiler/tests/integration/data/chinook/customers.csv');
 ```
 
-and finally query them using PSQL (example copied from PRQL):
+and finally query the data using PSQL (example inspired by PRQL):
 
 ```sql
-from invoices |
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |
 where invoice_date >= date '1970-01-16' |
 select
   *, 
@@ -69,7 +65,8 @@ select
 order by sum_income desc |
 limit 10 |
 as t |
-join customers on t.customer_id = customers.customer_id |
+join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' as customers
+  on t.customer_id = customers.customer_id |
 select
   customer_id, last_name || ', ' || first_name as name, 
   sum_income,
@@ -83,16 +80,16 @@ which returns:
 │ customer_id │        name         │ sum_income │ db_version │
 │    int64    │       varchar       │   double   │  varchar   │
 ├─────────────┼─────────────────────┼────────────┼────────────┤
-│           6 │ Holý, Helena        │      43.83 │ v0.7.0     │
-│           7 │ Gruber, Astrid      │      36.83 │ v0.7.0     │
-│          24 │ Ralston, Frank      │      37.83 │ v0.7.0     │
-│          25 │ Stevens, Victor     │      36.83 │ v0.7.0     │
-│          26 │ Cunningham, Richard │      41.83 │ v0.7.0     │
-│          28 │ Barnett, Julia      │      37.83 │ v0.7.0     │
-│          37 │ Zimmermann, Fynn    │      37.83 │ v0.7.0     │
-│          45 │ Kovács, Ladislav    │      39.83 │ v0.7.0     │
-│          46 │ O'Reilly, Hugh      │      39.83 │ v0.7.0     │
-│          57 │ Rojas, Luis         │      40.83 │ v0.7.0     │
+│           6 │ Holý, Helena        │      43.83 │ v0.7.1     │
+│           7 │ Gruber, Astrid      │      36.83 │ v0.7.1     │
+│          24 │ Ralston, Frank      │      37.83 │ v0.7.1     │
+│          25 │ Stevens, Victor     │      36.83 │ v0.7.1     │
+│          26 │ Cunningham, Richard │      41.83 │ v0.7.1     │
+│          28 │ Barnett, Julia      │      37.83 │ v0.7.1     │
+│          37 │ Zimmermann, Fynn    │      37.83 │ v0.7.1     │
+│          45 │ Kovács, Ladislav    │      39.83 │ v0.7.1     │
+│          46 │ O'Reilly, Hugh      │      39.83 │ v0.7.1     │
+│          57 │ Rojas, Luis         │      40.83 │ v0.7.1     │
 ├─────────────┴─────────────────────┴────────────┴────────────┤
 │ 10 rows                                           4 columns │
 └─────────────────────────────────────────────────────────────┘
