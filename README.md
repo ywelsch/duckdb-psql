@@ -4,10 +4,10 @@
 
 PSQL is a piped SQL dialect for DuckDB. The idea is to extend SQL with a pipe syntax to write simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) or [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), and provides the full power of DuckDB's SQL.
 
-PSQL allows you to write SQL queries in a more natural way:
+With PSQL you can compose your SQL queries in a more natural way:
 
 ```sql
-from 'http://example.com/invoices' |
+from 'http://example.com/invoices.csv' |
 where invoice_date >= today() - interval 30 day |
 select
   customer_id,
@@ -33,7 +33,7 @@ FROM _tmp3 D
 
 # Limitations
 
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex replacement), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
 
 ## Running the DuckDB extension
 
@@ -64,9 +64,9 @@ select
   group by customer_id |
 order by sum_income desc |
 limit 10 |
-as t |
+as invoices |
 join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' as customers
-  on t.customer_id = customers.customer_id |
+  on invoices.customer_id = customers.customer_id |
 select
   customer_id, last_name || ', ' || first_name as name, 
   sum_income,
