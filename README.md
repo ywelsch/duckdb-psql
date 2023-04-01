@@ -1,52 +1,10 @@
 [![Linux](https://github.com/ywelsch/duckdb-psql/actions/workflows/Linux.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/Linux.yml) [![MacOS](https://github.com/ywelsch/duckdb-psql/actions/workflows/MacOS.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/MacOS.yml) [![Windows](https://github.com/ywelsch/duckdb-psql/actions/workflows/Windows.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/Windows.yml)
 
-# PSQL: a piped SQL dialect for DuckDB
+# PSQL: a piped SQL for DuckDB
 
-PSQL is a piped SQL dialect for DuckDB. The idea is to extend SQL with a pipe syntax to write simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) or [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), and provides the full power of DuckDB's SQL.
+PSQL extends [DuckDB](https://duckdb.org)'s SQL with a pipe syntax to provide simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) and [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), yet leveraging the full power of DuckDB's SQL.
 
-With PSQL you can compose your SQL queries in a more natural way:
-
-```sql
-from 'http://example.com/invoices.csv' |
-where invoice_date >= today() - interval 30 day |
-select
-  customer_id,
-  avg(total) as avg_spend
-  group by all |
-where avg_spend > 20
-```
-
-## How does it work?
-
-The underlying engine just does a simple syntactic transformation of the query, rewriting a query of the form 
-
-```sql
-A | B | C | D
-```
-to
-```sql
-WITH _tmp1 AS (A),
-     _tmp2 AS (FROM _tmp1 B)
-     _tmp3 AS (FROM _tmp2 C)
-FROM _tmp3 D
-```
-
-# Limitations
-
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex replacement), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
-
-## Running the DuckDB extension
-
-For installation instructions, see further below. After installing the extension, you can directly query DuckDB using PSQL, the Piped SQL. Both PSQL and regular SQL commands are supported within the same shell.
-
-We first load the `httpfs` extension to access remote data:
-
-```sql
-INSTALL httpfs;
-LOAD httpfs;
-```
-
-and finally query the data using PSQL (example inspired by PRQL):
+Pipes allow you to compose your SQL queries in a very natural way (example inspired by PRQL):
 
 ```sql
 from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |
@@ -65,7 +23,8 @@ select
 order by sum_income desc |
 limit 10 |
 as invoices |
-join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' as customers
+join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv'
+    as customers
   on invoices.customer_id = customers.customer_id |
 select
   customer_id, last_name || ', ' || first_name as name, 
@@ -95,7 +54,26 @@ which returns:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Install
+## How does it work?
+
+The underlying engine just does a simple syntactic transformation of the query, rewriting pipes
+
+```sql
+A | B | C | D
+```
+to
+```sql
+WITH _tmp1 AS (A),
+     _tmp2 AS (FROM _tmp1 B)
+     _tmp3 AS (FROM _tmp2 C)
+FROM _tmp3 D
+```
+
+# Limitations
+
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex replacement), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
+
+## Installing the extension
 
 To install the PSQL extension, DuckDB needs to be launched with the `allow_unsigned_extensions` option set to true.
 Depending on the DuckDB usage, this can be configured as follows:
