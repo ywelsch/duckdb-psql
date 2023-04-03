@@ -55,6 +55,18 @@ which returns:
 └─────────────────────────────────────────────────────────────┘
 ```
 
+Pipes can also be used in sub-expression, by using a special syntax to delimit start and end of pipelines:
+
+```sql
+create view invoices as (|
+  from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |
+  where invoice_date >= date '1970-01-16' |
+  select
+    0.8 as transaction_fees,
+    total - transaction_fees as income
+|);
+```
+
 ## How does it work?
 
 The underlying engine just does a simple syntactic transformation of the query, rewriting pipes
@@ -72,7 +84,7 @@ FROM _tmp3 D
 
 ## Limitations
 
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is not implemented using any parsing framework (but just a quick and dirty regex replacement), it does not allow pipes to be used in sub-expressions. Having this would enable further capabilites (e.g. constructing CTEs, views, tables out of PSQL expressions).
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is just implemented as a simple pre-processing step using quick and dirty regex subsitutions, it is unaware of the scoping rules of SQL. It has a special syntax for piped sub-expressions (surrounded by `(|` and `|)`) and does not allow arbitrary nesting of piped sub-expressions.
 
 ## Installing the extension
 

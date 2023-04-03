@@ -23,16 +23,12 @@ static void LoadInternal(DatabaseInstance &instance) {
 
 void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
 
-ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
-                                      const std::string &query) {
-  // Rewrite A | B | C to WITH $e1 AS (A), $e2 AS (FROM $e1 B) FROM $e2 C
-
-  size_t count = 0;
-  size_t pos = 0;
+// Rewrite A | B | C to WITH $e1 AS (A), $e2 AS (FROM $e1 B) FROM $e2 C
+void transform_block(const std::string &block, std::stringstream &ss) {
   std::string command;
   std::string prev_name = "";
-  std::stringstream ss;
-  duckdb_re2::StringPiece input(query);
+  duckdb_re2::StringPiece input(block);
+  size_t count = 0;
   RE2::Options options;
   options.set_dot_nl(true);
   RE2 re("(.*?)\\s+[|]\\s+", options);
@@ -63,8 +59,31 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
   if (count > 0) {
     ss << "\nFROM " << prev_name << " " << command;
   } else {
-    ss << query;
+    ss << command;
   }
+}
+
+ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
+                                      const std::string &query) {
+  std::stringstream ss;
+
+  // Identify blocks, delimited by "(|" and "|)"
+  RE2::Options options;
+  options.set_dot_nl(true);
+  RE2 block_re("(.*?)[(][|](.*?)[|][)]", options);
+  duckdb_re2::StringPiece input(query);
+  std::string pre_block_command;
+  std::string block_command;
+
+  while (RE2::Consume(&input, block_re, &pre_block_command, &block_command)) {
+    transform_block(pre_block_command, ss);
+    ss << "(";
+    transform_block(block_command, ss);
+    ss << ")";
+  }
+  std::string post_block_command;
+  post_block_command = input.ToString();
+  transform_block(post_block_command, ss);
   std::string result = ss.str();
   
   //printf("Result: %s\n", result.c_str());
