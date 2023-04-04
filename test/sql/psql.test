@@ -34,11 +34,11 @@ from t1 | select i || ',' || i;
 
 # as statement to provide named access
 statement ok
-from t1 | select i || ',' || i as bar | as foo | select foo.bar;
+from t1 | select i || ',' || i as bar | as foo select foo.bar;
 
 # scoped transforms
 statement ok
-create table t2 as (| from t1 | select i || ',' || i as bar | as foo | select foo.bar |);
+create table t2 as (| from t1 | select i || ',' || i as bar | as foo select foo.bar |);
 
 # multiple scoped transforms
 statement ok

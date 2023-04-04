@@ -26,7 +26,6 @@ void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
 // Rewrite A | B | C to WITH $e1 AS (A), $e2 AS (FROM $e1 B) FROM $e2 C
 void transform_block(const std::string &block, std::stringstream &ss) {
   std::string command;
-  std::string prev_name = "";
   duckdb_re2::StringPiece input(block);
   size_t count = 0;
   RE2::Options options;
@@ -39,25 +38,16 @@ void transform_block(const std::string &block, std::stringstream &ss) {
     } else {
       ss << "WITH ";
     }
-    std::string name;
-    bool as_expr = RE2::FullMatch(command, "as\\s+(\\w+)", &name);
-    if (!as_expr) {
-      name = "_tmp" + std::to_string(count);
-    }
-    ss << name << " AS (";
+    ss << "_tmp" << count << " AS (";
     if (count > 0) {
-      ss << "FROM " << prev_name << " ";
+      ss << "FROM " << "_tmp" << (count - 1) << " ";
     }
-    if (!as_expr) {
-      ss << command;
-    }
-    ss << ")";
-    prev_name = name;
+    ss << command << ")";
     ++count;
   }
   command = input.ToString();
   if (count > 0) {
-    ss << "\nFROM " << prev_name << " " << command;
+    ss << "\nFROM " <<  "_tmp" << (count - 1) << " " << command;
   } else {
     ss << command;
   }

@@ -22,8 +22,8 @@ select
   group by customer_id |
 order by sum_income desc |
 limit 10 |
-as invoices |
-join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv'
+as invoices
+  join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv'
     as customers
   on invoices.customer_id = customers.customer_id |
 select
