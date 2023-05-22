@@ -18,7 +18,7 @@ static void LoadInternal(DatabaseInstance &instance) {
   auto &config = DBConfig::GetConfig(instance);
   PsqlParserExtension psql_parser;
   config.parser_extensions.push_back(psql_parser);
-  config.operator_extensions.push_back(make_unique<PsqlOperatorExtension>());
+  config.operator_extensions.push_back(make_uniq<PsqlOperatorExtension>());
 }
 
 void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
@@ -79,12 +79,12 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
   //printf("Result: %s\n", result.c_str());
 
   Parser parser; // TODO Pass (ClientContext.GetParserOptions());
-  parser.ParseQuery(move(result));
+  parser.ParseQuery(std::move(result));
   vector<unique_ptr<SQLStatement>> statements = std::move(parser.statements);
 
   return ParserExtensionParseResult(
-      make_unique_base<ParserExtensionParseData, PsqlParseData>(
-          move(statements[0])));
+      make_uniq_base<ParserExtensionParseData, PsqlParseData>(
+          std::move(statements[0])));
 }
 
 ParserExtensionPlanResult
@@ -93,7 +93,7 @@ psql_plan(ParserExtensionInfo *, ClientContext &context,
   // We stash away the ParserExtensionParseData before throwing an exception
   // here. This allows the planning to be picked up by psql_bind instead, but
   // we're not losing important context.
-  auto psql_state = make_shared<PsqlState>(move(parse_data));
+  auto psql_state = make_shared<PsqlState>(std::move(parse_data));
   context.registered_state["psql"] = psql_state;
   throw BinderException("Use psql_bind instead");
 }

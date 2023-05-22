@@ -18,7 +18,7 @@ struct PsqlOperatorExtension : public OperatorExtension {
 
   std::string GetName() override { return "psql"; }
 
-  std::unique_ptr<LogicalExtensionOperator>
+  unique_ptr<LogicalExtensionOperator>
   Deserialize(LogicalDeserializationState &state,
               FieldReader &reader) override {
     throw InternalException("psql operator should not be serialized");
@@ -42,18 +42,18 @@ struct PsqlParseData : ParserExtensionParseData {
   unique_ptr<SQLStatement> statement;
 
   unique_ptr<ParserExtensionParseData> Copy() const override {
-    return make_unique_base<ParserExtensionParseData, PsqlParseData>(
+    return make_uniq_base<ParserExtensionParseData, PsqlParseData>(
         statement->Copy());
   }
 
   PsqlParseData(unique_ptr<SQLStatement> statement)
-      : statement(move(statement)) {}
+      : statement(std::move(statement)) {}
 };
 
 class PsqlState : public ClientContextState {
 public:
   explicit PsqlState(unique_ptr<ParserExtensionParseData> parse_data)
-      : parse_data(move(parse_data)) {}
+      : parse_data(std::move(parse_data)) {}
 
   void QueryEnd() override { parse_data.reset(); }
 
