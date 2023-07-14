@@ -3,7 +3,7 @@
 # group: [psql]
 
 statement ok
-CREATE TABLE t1(i INTEGER);
+CREATE TABLE t1(i INTEGER, j INTEGER);
 
 # Before we load the extension, this will fail
 statement error
@@ -30,16 +30,16 @@ Parser Error: syntax error at or near "j"
 
 # Only split on | that has whitespace around it
 statement ok
-from t1 | select i || ',' || i;
+from t1 | select i || ',' || j;
 
 # as statement to provide named access
 statement ok
-from t1 | select i || ',' || i as bar | as foo select foo.bar;
+from t1 | select i || ',' || j as bar | as foo select foo.bar;
 
 # scoped transforms
 statement ok
-create table t2 as (| from t1 | select i || ',' || i as bar | as foo select foo.bar |);
+create table t2 as (| from t1 | select i || ',' || j as bar | as foo select foo.bar |);
 
 # multiple scoped transforms
 statement ok
-with x as (| from t1 | select i || ',' || i as bar | as foo |), y as (| from t1 | select i || ',' || i as bar | as foo |) from x union from y;
+with x as (| from t1 | select i || ',' || j as bar | as foo |), y as (| from t1 | select i || ',' || j as bar | as foo |) from x union from y;

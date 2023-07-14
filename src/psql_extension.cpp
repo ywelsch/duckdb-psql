@@ -8,6 +8,8 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/extension_statement.hpp"
 
+#include "pg_functions.hpp"
+
 #include "re2/re2.h"
 
 #include <sstream>
@@ -32,7 +34,7 @@ void transform_block(const std::string &block, std::stringstream &ss) {
   options.set_dot_nl(true);
   RE2 re("(.*?)\\s+[|]\\s+", options);
   while (RE2::Consume(&input, re, &command)) {
-    //printf("Command: %s\n", command.c_str());
+    // printf("Command: %s\n", command.c_str());
     if (count > 0) {
       ss << ",\n";
     } else {
@@ -40,14 +42,16 @@ void transform_block(const std::string &block, std::stringstream &ss) {
     }
     ss << "_tmp" << count << " AS (";
     if (count > 0) {
-      ss << "FROM " << "_tmp" << (count - 1) << " ";
+      ss << "FROM "
+         << "_tmp" << (count - 1) << " ";
     }
     ss << command << ")";
     ++count;
   }
   command = input.ToString();
   if (count > 0) {
-    ss << "\nFROM " <<  "_tmp" << (count - 1) << " " << command;
+    ss << "\nFROM "
+       << "_tmp" << (count - 1) << " " << command;
   } else {
     ss << command;
   }
@@ -75,12 +79,20 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
   post_block_command = input.ToString();
   transform_block(post_block_command, ss);
   std::string result = ss.str();
-  
-  //printf("Result: %s\n", result.c_str());
 
-  Parser parser; // TODO Pass (ClientContext.GetParserOptions());
-  parser.ParseQuery(std::move(result));
-  vector<unique_ptr<SQLStatement>> statements = std::move(parser.statements);
+  // printf("Result: %s\n", result.c_str());
+
+  vector<unique_ptr<SQLStatement>> statements;
+  try {
+    Parser parser; // TODO Pass (ClientContext.GetParserOptions());
+    parser.ParseQuery(result);
+    statements = std::move(parser.statements);
+  } catch (...) {
+    duckdb_libpgquery::pg_parser_init();
+    throw;
+  }
+
+  duckdb_libpgquery::pg_parser_init();
 
   return ParserExtensionParseResult(
       make_uniq_base<ParserExtensionParseData, PsqlParseData>(
