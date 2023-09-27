@@ -8,8 +8,6 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/extension_statement.hpp"
 
-#include "pg_functions.hpp"
-
 #include "re2/re2.h"
 
 #include <sstream>
@@ -82,17 +80,9 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
 
   // printf("Result: %s\n", result.c_str());
 
-  vector<unique_ptr<SQLStatement>> statements;
-  try {
-    Parser parser; // TODO Pass (ClientContext.GetParserOptions());
-    parser.ParseQuery(result);
-    statements = std::move(parser.statements);
-  } catch (...) {
-    duckdb_libpgquery::pg_parser_init();
-    throw;
-  }
-
-  duckdb_libpgquery::pg_parser_init();
+  Parser parser; // TODO Pass (ClientContext.GetParserOptions());
+  parser.ParseQuery(result);
+  auto statements = std::move(parser.statements);
 
   return ParserExtensionParseResult(
       make_uniq_base<ParserExtensionParseData, PsqlParseData>(
