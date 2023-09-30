@@ -19,8 +19,7 @@ struct PsqlOperatorExtension : public OperatorExtension {
   std::string GetName() override { return "psql"; }
 
   unique_ptr<LogicalExtensionOperator>
-  Deserialize(LogicalDeserializationState &state,
-              FieldReader &reader) override {
+  Deserialize(Deserializer &deserializer) override {
     throw InternalException("psql operator should not be serialized");
   }
 };
