@@ -103,7 +103,7 @@ con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
 
 A custom extension repository then needs to be defined as follows:
 ```sql
-SET custom_extension_repository='welsch.lu/duckdb/psql/latest';
+SET custom_extension_repository='http://welsch.lu/duckdb/psql/latest';
 ```
 Note that the `/latest` path will provide the latest extension version available for the current version of DuckDB.
 A given extension version can be selected by using that version as last path element instead.
