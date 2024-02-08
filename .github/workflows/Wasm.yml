@@ -16,19 +16,13 @@ jobs:
       matrix:
         # Add commits/tags to build against other DuckDB versions
         duckdb_version: [ '<submodule_version>' ]
-        wasmdep: ['mvp', 'eh', 'threads']
+        duckdb_wasm_arch: ['mvp', 'eh', 'threads']
     env:
       GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      DUCKDB_PLATFORM: "wasm_${{ matrix.duckdb_wasm_arch }}"
 
     steps:
-    - name: Install required ubuntu packages
-      run: |
-        apt-get update -y -qq
-        apt-get install -y -qq software-properties-common
-        add-apt-repository ppa:git-core/ppa
-        apt-get update -y -qq
-        apt-get install -y -qq ninja-build make gcc-multilib g++-multilib libssl-dev wget openjdk-8-jdk zip maven unixodbc-dev libc6-dev-i386 lib32readline6-dev libssl-dev libcurl4-gnutls-dev libexpat1-dev gettext unzip build-essential checkinstall libffi-dev curl libz-dev openssh-client
-
     - name: Install Git 2.18.5
       run: |
         wget https://github.com/git/git/archive/refs/tags/v2.18.5.tar.gz
@@ -41,6 +35,11 @@ jobs:
     - uses: mymindstorm/setup-emsdk@v12
       with:
         version: 'latest'
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11.1
+      with:
+          vcpkgGitCommitId: a42af01b72c28a8e1d7b48107b33e4f286a55ef6
 
     - uses: actions/checkout@v3
       with:
@@ -58,16 +57,16 @@ jobs:
     # Build extension
     - name: Build extension
       env:
-        GEN: ninja
-        WASMDEP: ${{ matrix.wasmdep }}
+        STATIC_LIBCPP: 1
+        EXTENSION_STATIC_BUILD: 1
       run: |
-        make wasm_$WASMDEP
+        make wasm_${{ env.DUCKDB_PLATFORM }}
 
     - uses: actions/upload-artifact@v2
       with:
-        name: wasm-${{matrix.wasmdep}}-extensions
+        name: wasm-${{matrix.duckdb_wasm_arch}}-extensions
         path: |
-          build/wasm_${{matrix.wasmdep}}/psql.duckdb_extension.wasm
+          build/wasm_${{matrix.duckdb_wasm_arch}}/psql.duckdb_extension.wasm
 
     - name: Install SSH Key
       uses: shimataro/ssh-key-action@v2
@@ -90,7 +89,7 @@ jobs:
         if [[ "$SSH_HOST" == "" ]] ; then
           echo 'No key set, skipping'
         elif [[ "$GITHUB_REF" =~ ^(refs/tags/v.+)$ ]] ; then
-          ./scripts/extension-upload.sh psql ${{ github.ref_name }} $DUCKDB_VERSION ${{matrix.wasmdep}} true
+          ./scripts/extension-upload.sh psql ${{ github.ref_name }} $DUCKDB_VERSION ${{matrix.duckdb_wasm_arch}} true
         elif [[ "$GITHUB_REF" =~ ^(refs/heads/main)$ ]] ; then
-          ./scripts/extension-upload.sh psql `git log -1 --format=%h` $DUCKDB_VERSION ${{matrix.wasmdep}} false
+          ./scripts/extension-upload.sh psql `git log -1 --format=%h` $DUCKDB_VERSION ${{matrix.duckdb_wasm_arch}} false
         fi
