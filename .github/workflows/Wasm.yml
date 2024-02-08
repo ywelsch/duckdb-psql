@@ -1,0 +1,95 @@
+name: WASM
+on: [push, pull_request,repository_dispatch]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}-${{ github.base_ref || '' }}-${{ github.ref != 'refs/heads/main' || github.sha }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  wasm:
+    name: Wasm Release
+    runs-on: ubuntu-latest
+    container: 'ubuntu:18.04'
+    strategy:
+      matrix:
+        # Add commits/tags to build against other DuckDB versions
+        duckdb_version: [ '<submodule_version>' ]
+        duckdb_wasm_arch: ['mvp', 'eh', 'threads']
+    env:
+      GEN: ninja
+      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+      DUCKDB_PLATFORM: "wasm_${{ matrix.duckdb_wasm_arch }}"
+
+    steps:
+    - name: Install Git 2.18.5
+      run: |
+        wget https://github.com/git/git/archive/refs/tags/v2.18.5.tar.gz
+        tar xvf v2.18.5.tar.gz
+        cd git-2.18.5
+        make
+        make prefix=/usr install
+        git --version
+
+    - uses: mymindstorm/setup-emsdk@v12
+      with:
+        version: 'latest'
+    
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11.1
+      with:
+          vcpkgGitCommitId: a42af01b72c28a8e1d7b48107b33e4f286a55ef6
+
+    - uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+        submodules: 'true'
+
+    - name: Checkout DuckDB to version
+      if: ${{ matrix.duckdb_version != '<submodule_version>'}}
+      run: |
+        cd duckdb
+        git checkout ${{ matrix.duckdb_version }}
+
+    - uses: ./duckdb/.github/actions/ubuntu_18_setup
+
+    # Build extension
+    - name: Build extension
+      env:
+        STATIC_LIBCPP: 1
+        EXTENSION_STATIC_BUILD: 1
+      run: |
+        make wasm_${{ env.DUCKDB_PLATFORM }}
+
+    - uses: actions/upload-artifact@v2
+      with:
+        name: wasm-${{matrix.duckdb_wasm_arch}}-extensions
+        path: |
+          build/wasm_${{matrix.duckdb_wasm_arch}}/psql.duckdb_extension.wasm
+
+    - name: Install SSH Key
+      uses: shimataro/ssh-key-action@v2
+      with:
+        key: ${{ secrets.SSH_PRIVATE_KEY }}
+        known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+    
+    - name: Deploy
+      env:
+        SSH_USER: ${{ secrets.SSH_USER }}
+        SSH_HOST: ${{ secrets.SSH_HOST }}
+        UPLOAD_BASE_PATH: ${{ secrets.UPLOAD_BASE_PATH }}
+      run: |
+        git config --global --add safe.directory '*'
+        cd duckdb
+        git fetch --tags
+        export DUCKDB_VERSION=`git tag --points-at HEAD`
+        export DUCKDB_VERSION=${DUCKDB_VERSION:=`git log -1 --format=%h`}
+        cd ..
+        if [[ "$SSH_HOST" == "" ]] ; then
+          echo 'No key set, skipping'
+        elif [[ "$GITHUB_REF" =~ ^(refs/tags/v.+)$ ]] ; then
+          ./scripts/extension-upload.sh psql ${{ github.ref_name }} $DUCKDB_VERSION ${{matrix.duckdb_wasm_arch}} true
+        elif [[ "$GITHUB_REF" =~ ^(refs/heads/main)$ ]] ; then
+          ./scripts/extension-upload.sh psql `git log -1 --format=%h` $DUCKDB_VERSION ${{matrix.duckdb_wasm_arch}} false
+        fi
