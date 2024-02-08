@@ -11,7 +11,7 @@ jobs:
   wasm:
     name: Wasm Release
     runs-on: ubuntu-latest
-    container: ${{ matrix.container }}
+    container: 'ubuntu:18.04'
     strategy:
       matrix:
         # Add commits/tags to build against other DuckDB versions
@@ -42,6 +42,8 @@ jobs:
       with:
         version: 'latest'
 
+    - uses: ./duckdb/.github/actions/ubuntu_18_setup
+  
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0
