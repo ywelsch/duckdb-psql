@@ -42,8 +42,6 @@ jobs:
       with:
         version: 'latest'
 
-    - uses: ./duckdb/.github/actions/ubuntu_18_setup
-  
     - uses: actions/checkout@v3
       with:
         fetch-depth: 0
@@ -54,6 +52,8 @@ jobs:
       run: |
         cd duckdb
         git checkout ${{ matrix.duckdb_version }}
+
+    - uses: ./duckdb/.github/actions/ubuntu_18_setup
 
     # Build extension
     - name: Build extension
