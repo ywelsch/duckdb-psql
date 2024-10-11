@@ -90,32 +90,18 @@ FROM (
 
 This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is just implemented as a simple pre-processing step using quick and dirty regex subsitutions, it is unaware of the scoping rules of SQL. It has a special syntax for piped sub-expressions (surrounded by `(|` and `|)`) and does not allow arbitrary nesting of piped sub-expressions.
 
-## Installing the extension
+## Running the extension
 
-To install the PSQL extension, DuckDB needs to be launched with the `allow_unsigned_extensions` option set to true.
-Depending on the DuckDB usage, this can be configured as follows:
+The PSQL extension is a [DuckDB community extension](https://community-extensions.duckdb.org/extensions/psql.html), and can simply be installed with
 
-CLI:
-```shell
-duckdb -unsigned
-```
-
-Python:
-```python
-con = duckdb.connect(':memory:', config={'allow_unsigned_extensions' : 'true'})
-```
-
-A custom extension repository then needs to be defined as follows:
 ```sql
-SET custom_extension_repository='http://welsch.lu/duckdb/psql/latest';
+install psql from community;
 ```
-Note that the `/latest` path will provide the latest extension version available for the current version of DuckDB.
-A given extension version can be selected by using that version as last path element instead.
 
-After running these steps, the extension can then be installed and loaded using the regular INSTALL/LOAD commands in DuckDB:
-```sql
-FORCE INSTALL psql; # To override current installation with latest
-LOAD psql;
+and subsequently loaded with
+
+```
+load psql;
 ```
 
 ## Build from source
