@@ -1,5 +1,3 @@
-[![Linux](https://github.com/ywelsch/duckdb-psql/actions/workflows/Linux.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/Linux.yml) [![MacOS](https://github.com/ywelsch/duckdb-psql/actions/workflows/MacOS.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/MacOS.yml) [![Windows](https://github.com/ywelsch/duckdb-psql/actions/workflows/Windows.yml/badge.svg)](https://github.com/ywelsch/duckdb-psql/actions/workflows/Windows.yml)
-
 # PSQL: a piped SQL for DuckDB
 
 PSQL extends [DuckDB](https://duckdb.org)'s SQL with a pipe syntax to provide simple composable queries. It's a lightweight variant of piped languages such as [PRQL](https://prql-lang.org) and [Kusto](https://docs.microsoft.com/azure/data-explorer/kusto/query/samples?pivots=azuredataexplorer), yet leveraging the full power of DuckDB's SQL.
