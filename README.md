@@ -76,10 +76,16 @@ A | B | C | D
 ```
 to
 ```sql
-WITH _tmp1 AS (A),
-     _tmp2 AS (FROM _tmp1 B)
-     _tmp3 AS (FROM _tmp2 C)
-FROM _tmp3 D
+FROM (
+FROM (
+FROM (
+  A
+)
+  B
+)
+  C
+)
+  D
 ```
 
 ## Limitations

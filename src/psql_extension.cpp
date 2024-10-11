@@ -23,7 +23,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 
 void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
 
-// Rewrite A | B | C to WITH $e1 AS (A), $e2 AS (FROM $e1 B) FROM $e2 C
+// Rewrite A | B | C to FROM ( FROM ( A ) B ) C
 void transform_block(const std::string &block, std::stringstream &ss) {
   std::string command;
   duckdb_re2::StringPiece input(block);
@@ -31,28 +31,19 @@ void transform_block(const std::string &block, std::stringstream &ss) {
   RE2::Options options;
   options.set_dot_nl(true);
   RE2 re("(.*?)\\s+[|]\\s+", options);
+  std::stringstream intermediates;
   while (RE2::Consume(&input, re, &command)) {
     // printf("Command: %s\n", command.c_str());
-    if (count > 0) {
-      ss << ",\n";
-    } else {
-      ss << "WITH ";
-    }
-    ss << "_tmp" << count << " AS (";
-    if (count > 0) {
-      ss << "FROM "
-         << "_tmp" << (count - 1) << " ";
-    }
-    ss << command << ")";
+    intermediates << command << " )";
     ++count;
   }
-  command = input.ToString();
-  if (count > 0) {
-    ss << "\nFROM "
-       << "_tmp" << (count - 1) << " " << command;
-  } else {
-    ss << command;
+  for (size_t i = 0; i < count; ++i) {
+    ss << "FROM "
+       << "( ";
   }
+  ss << intermediates.str();
+  command = input.ToString();
+  ss << command;
 }
 
 ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
