@@ -30,7 +30,7 @@ void transform_block(const std::string &block, std::stringstream &ss) {
   size_t count = 0;
   RE2::Options options;
   options.set_dot_nl(true);
-  RE2 re("(.*?)\\s+[|]\\s+", options);
+  RE2 re("(.*?)\\s+[|][>]\\s+", options);
   std::stringstream intermediates;
   while (RE2::Consume(&input, re, &command)) {
     // printf("Command: %s\n", command.c_str());

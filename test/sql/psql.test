@@ -7,39 +7,39 @@ CREATE TABLE t1(i INTEGER, j INTEGER);
 
 # Before we load the extension, this will fail
 statement error
-from t1 | order by i
+from t1 |> order by i
 ----
-Parser Error: syntax error at or near "|"
+Parser Error: syntax error at or near "|>"
 
 # Require statement will ensure this test is run with this extension loaded
 require psql
 
 # Confirm the extension works
 statement ok
-from t1 | order by i
+from t1 |> order by i
 
 # Trailing semicolon should work (e.g. used as part of CLI)
 statement ok
-from t1 | order by i;
+from t1 |> order by i;
 
 # Bad psql statement
 statement error
-from t1 | srt j
+from t1 |> srt j
 ----
 Parser Error: syntax error at or near "j"
 
 # Only split on | that has whitespace around it
 statement ok
-from t1 | select i || ',' || j;
+from t1 |> select i || ',' || j;
 
 # as statement to provide named access
 statement ok
-from t1 | select i || ',' || j as bar | as foo select foo.bar;
+from t1 |> select i || ',' || j as bar |> as foo select foo.bar;
 
 # scoped transforms
 statement ok
-create table t2 as (| from t1 | select i || ',' || j as bar | as foo select foo.bar |);
+create table t2 as (| from t1 |> select i || ',' || j as bar |> as foo select foo.bar |);
 
 # multiple scoped transforms
 statement ok
-with x as (| from t1 | select i || ',' || j as bar | as foo |), y as (| from t1 | select i || ',' || j as bar | as foo |) from x union from y;
+with x as (| from t1 |> select i || ',' || j as bar |> as foo |), y as (| from t1 |> select i || ',' || j as bar |> as foo |) from x union from y;

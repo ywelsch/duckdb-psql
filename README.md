@@ -7,25 +7,25 @@ PSQL extends [DuckDB](https://duckdb.org)'s SQL with a pipe syntax to provide si
 Pipes allow you to compose your SQL queries in a very natural way (example inspired by PRQL):
 
 ```sql
-from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |
-where invoice_date >= date '1970-01-16' |
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+where invoice_date >= date '1970-01-16' |>
 select
   *, 
   0.8 as transaction_fees,
-  total - transaction_fees as income |
-where income > 1 |
+  total - transaction_fees as income |>
+where income > 1 |>
 select
   customer_id, 
   avg(total), 
   sum(income) as sum_income, 
   count() as ct
-  group by customer_id |
-order by sum_income desc |
-limit 10 |
+  group by customer_id |>
+order by sum_income desc |>
+limit 10 |>
 as invoices
   join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv'
     as customers
-  on invoices.customer_id = customers.customer_id |
+  on invoices.customer_id = customers.customer_id |>
 select
   customer_id,
   last_name || ', ' || first_name as name,
@@ -59,8 +59,8 @@ Pipes can also be used in sub-expression, by using a special syntax to delimit s
 
 ```sql
 create view invoices as (|
-  from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |
-  where invoice_date >= date '1970-01-16' |
+  from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+  where invoice_date >= date '1970-01-16' |>
   select
     0.8 as transaction_fees,
     total - transaction_fees as income
