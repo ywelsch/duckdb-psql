@@ -24,7 +24,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
 
 // Rewrite A | B | C to FROM ( FROM ( A ) B ) C
-void transform_block(const std::string &block, std::stringstream &ss) {
+bool transform_block(const std::string &block, std::stringstream &ss) {
   std::string command;
   duckdb_re2::StringPiece input(block);
   size_t count = 0;
@@ -44,6 +44,7 @@ void transform_block(const std::string &block, std::stringstream &ss) {
   ss << intermediates.str();
   command = input.ToString();
   ss << command;
+  return count > 0;
 }
 
 ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
@@ -57,8 +58,10 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
   duckdb_re2::StringPiece input(query);
   std::string pre_block_command;
   std::string block_command;
+  bool psql_found = false;
 
   while (RE2::Consume(&input, block_re, &pre_block_command, &block_command)) {
+    psql_found = true;
     transform_block(pre_block_command, ss);
     ss << "(";
     transform_block(block_command, ss);
@@ -66,8 +69,13 @@ ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
   }
   std::string post_block_command;
   post_block_command = input.ToString();
-  transform_block(post_block_command, ss);
+  psql_found |= transform_block(post_block_command, ss);
   std::string result = ss.str();
+
+  if (!psql_found) {
+    // throw original exception message
+    return ParserExtensionParseResult();
+  }
 
   // printf("Result: %s\n", result.c_str());
 
@@ -86,8 +94,9 @@ psql_plan(ParserExtensionInfo *, ClientContext &context,
   // We stash away the ParserExtensionParseData before throwing an exception
   // here. This allows the planning to be picked up by psql_bind instead, but
   // we're not losing important context.
-  auto psql_state = make_shared<PsqlState>(std::move(parse_data));
-  context.registered_state["psql"] = psql_state;
+  auto psql_state = make_shared_ptr<PsqlState>(std::move(parse_data));
+  context.registered_state->Remove("psql");
+  context.registered_state->Insert("psql", psql_state);
   throw BinderException("Use psql_bind instead");
 }
 
@@ -97,10 +106,10 @@ BoundStatement psql_bind(ClientContext &context, Binder &binder,
   case StatementType::EXTENSION_STATEMENT: {
     auto &extension_statement = dynamic_cast<ExtensionStatement &>(statement);
     if (extension_statement.extension.parse_function == psql_parse) {
-      auto lookup = context.registered_state.find("psql");
-      if (lookup != context.registered_state.end()) {
-        auto psql_state = (PsqlState *)lookup->second.get();
-        auto psql_binder = Binder::CreateBinder(context);
+      auto lookup = context.registered_state->Get<PsqlState>("psql");
+      if (lookup) {
+        auto psql_state = (PsqlState *)lookup.get();
+        auto psql_binder = Binder::CreateBinder(context, &binder);
         auto psql_parse_data =
             dynamic_cast<PsqlParseData *>(psql_state->parse_data.get());
         return psql_binder->Bind(*(psql_parse_data->statement));
