@@ -70,7 +70,7 @@ create view invoices as (|
 The underlying engine just does a simple syntactic transformation of the query, rewriting pipes
 
 ```sql
-A | B | C | D
+A |> B |> C |> D
 ```
 to
 ```sql
