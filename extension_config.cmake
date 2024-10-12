@@ -3,5 +3,6 @@
 # Extension from this repo
 duckdb_extension_load(psql
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
+    LINKED_LIBS "$(CMAKE_BINARY_DIR)/third_party/re2/libduckdb_re2.a"
     LOAD_TESTS
 )
