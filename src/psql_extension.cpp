@@ -14,14 +14,15 @@
 
 namespace duckdb {
 
-static void LoadInternal(DatabaseInstance &instance) {
+static void LoadInternal(ExtensionLoader &loader) {
+  auto &instance = loader.GetDatabaseInstance();
   auto &config = DBConfig::GetConfig(instance);
   PsqlParserExtension psql_parser;
   config.parser_extensions.push_back(psql_parser);
   config.operator_extensions.push_back(make_uniq<PsqlOperatorExtension>());
 }
 
-void PsqlExtension::Load(DuckDB &db) { LoadInternal(*db.instance); }
+void PsqlExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
 
 // Rewrite A | B | C to FROM ( FROM ( A ) B ) C
 bool transform_block(const std::string &block, std::stringstream &ss) {
@@ -127,13 +128,7 @@ BoundStatement psql_bind(ClientContext &context, Binder &binder,
 
 extern "C" {
 
-DUCKDB_EXTENSION_API void psql_init(duckdb::DatabaseInstance &db) {
-  LoadInternal(db);
-}
-
-DUCKDB_EXTENSION_API const char *psql_version() {
-  return duckdb::DuckDB::LibraryVersion();
-}
+DUCKDB_CPP_EXTENSION_ENTRY(psql, loader) { LoadInternal(loader); }
 }
 
 #ifndef DUCKDB_EXTENSION_MAIN

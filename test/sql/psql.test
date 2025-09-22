@@ -1,6 +1,6 @@
 # name: test/sql/psql.test
 # description: test psql extension
-# group: [psql]
+# group: [sql]
 
 statement ok
 CREATE TABLE t1(i INTEGER, j INTEGER);

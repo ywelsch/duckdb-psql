@@ -16,7 +16,7 @@ jobs:
     name: Build extension binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
-      duckdb_version: v1.2.1
+      duckdb_version: v1.4.0
       ci_tools_version: main
       extension_name: psql
       exclude_archs: ''
@@ -28,7 +28,7 @@ jobs:
     secrets: inherit
     with:
       extension_name: psql
-      duckdb_version: v1.2.1
+      duckdb_version: v1.4.0
       exclude_archs: ''
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
