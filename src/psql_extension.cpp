@@ -17,9 +17,8 @@ namespace duckdb {
 static void LoadInternal(ExtensionLoader &loader) {
   auto &instance = loader.GetDatabaseInstance();
   auto &config = DBConfig::GetConfig(instance);
-  PsqlParserExtension psql_parser;
-  config.parser_extensions.push_back(psql_parser);
-  config.operator_extensions.push_back(make_uniq<PsqlOperatorExtension>());
+  ParserExtension::Register(config, PsqlParserExtension());
+  OperatorExtension::Register(config, make_shared_ptr<PsqlOperatorExtension>());
 }
 
 void PsqlExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
