@@ -1,0 +1,16 @@
+# name: test/sql/psql_load.test
+# description: the connection that runs LOAD psql can use pipes in its next statement
+# group: [sql]
+
+statement error
+SELECT 1 AS x |> SELECT x + 1
+----
+syntax error at or near "|>"
+
+statement ok
+LOAD psql;
+
+query I
+SELECT 1 AS x |> SELECT x + 1
+----
+2

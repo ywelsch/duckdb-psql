@@ -53,26 +53,32 @@ which returns:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Pipes can also be used in sub-expression, by using a special syntax to delimit start and end of pipelines:
+Pipelines can be used anywhere a query can appear: in subqueries, CTEs, views, `CREATE TABLE ... AS`, `INSERT INTO ...`, and so on:
 
 ```sql
-create view invoices as (|
+create view invoices as
   from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
   where invoice_date >= date '1970-01-16' |>
   select
+    *,
     0.8 as transaction_fees,
-    total - transaction_fees as income
-|);
+    total - transaction_fees as income;
+
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' |>
+where customer_id in (from invoices |> where income > 20 |> select customer_id) |>
+select first_name, last_name;
 ```
+
+Earlier versions of PSQL required piped sub-expressions to be delimited with `(|` and `|)`. This syntax is still accepted, but no longer needed.
 
 ## How does it work?
 
-The underlying engine just does a simple syntactic transformation of the query, rewriting pipes
+PSQL extends the grammar of DuckDB's PEG parser, so that every query can be followed by pipe stages. A pipe stage is anything that can follow the first table of a `FROM`-first query: a table alias, joins, `SELECT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `QUALIFY`, set operations, `ORDER BY`, `LIMIT`, ... It is parsed as if the pipe input was written in that position, so
 
 ```sql
 A |> B |> C |> D
 ```
-to
+is equivalent to
 ```sql
 FROM (
 FROM (
@@ -86,9 +92,13 @@ FROM (
   D
 ```
 
+A `WITH` clause in front of a pipeline is visible in all of its stages.
+
 ## Limitations
 
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is just implemented as a simple pre-processing step using quick and dirty regex subsitutions, it is unaware of the scoping rules of SQL. It has a special syntax for piped sub-expressions (surrounded by `(|` and `|)`) and does not allow arbitrary nesting of piped sub-expressions.
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages.
+
+PSQL requires DuckDB 2.0 or later, which made the parser extensible. Earlier versions of PSQL for DuckDB 1.x implemented the syntax as a text substitution on the query, which was unaware of the scoping rules of SQL and did not allow arbitrary nesting of pipelines.
 
 ## Running the extension
 
@@ -100,9 +110,17 @@ install psql from community;
 
 and subsequently loaded with
 
-```
+```sql
 load psql;
 ```
+
+The pipe syntax is a grammar extension, which DuckDB activates per connection with the `active_grammar_extensions` setting. Loading PSQL activates it on every connection:
+
+- the connection that runs `load psql` can use pipes from its next statement on (not in later statements of the same query string, which are already parsed),
+- connections opened afterwards have it activated right away,
+- connections that were already open activate it at the end of their current or next query. They may be running a query on another thread while PSQL is loaded, so their settings cannot be changed right away.
+
+A connection can opt out with `reset active_grammar_extensions;` (or by setting the list of active grammar extensions without `psql`), and opt in again with `call psql_enable();`, which adds PSQL while keeping other active grammar extensions.
 
 ## Build from source
 To build the extension:
@@ -120,3 +138,8 @@ The main binaries that will be built are:
 - `psql.duckdb_extension` is the loadable binary as it would be distributed.
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
+
+To run the tests:
+```sh
+make test
+```

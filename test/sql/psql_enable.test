@@ -1,0 +1,64 @@
+# name: test/sql/psql_enable.test
+# description: loading psql enables it on existing and future connections
+# group: [sql]
+
+statement ok
+CREATE TABLE t1 AS SELECT 1 AS i;
+
+# open a second connection before psql is loaded
+statement ok con_existing
+SELECT 1;
+
+# loads psql outside of a query on this connection
+require psql
+
+# connections that are open while psql is loaded may be running a query on another thread, so they enable it at the
+# end of their current or next query. A statement that fails to parse is not a query yet.
+statement error
+from t1 |> select i
+----
+syntax error at or near "|>"
+
+statement ok
+SELECT 1;
+
+query I
+from t1 |> select i + 1
+----
+2
+
+statement ok con_existing
+SELECT 1;
+
+query I con_existing
+from t1 |> select i + 2
+----
+3
+
+# connections opened after psql is loaded have it enabled right away
+query I con_new
+from t1 |> select i + 3
+----
+4
+
+query T con_new
+SELECT current_setting('active_grammar_extensions');
+----
+[psql]
+
+# connections can still opt out, and opt in again
+statement ok con_new
+RESET active_grammar_extensions;
+
+statement error con_new
+from t1 |> select i
+----
+syntax error at or near "|>"
+
+statement ok con_new
+CALL psql_enable();
+
+query I con_new
+from t1 |> select i + 4
+----
+5

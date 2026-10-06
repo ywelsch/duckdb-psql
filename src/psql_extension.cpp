@@ -4,131 +4,498 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
-#include "duckdb/parser/parser.hpp"
-#include "duckdb/parser/statement/extension_statement.hpp"
-
-#include "re2/re2.h"
-
-#include <sstream>
+#include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/connection_manager.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/parser/grammar_extension.hpp"
+#include "duckdb/parser/peg/ast/table_alias.hpp"
+#include "duckdb/parser/peg/transformer/peg_transformer.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/query_node/set_operation_node.hpp"
+#include "duckdb/parser/result_modifier.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/joinref.hpp"
+#include "duckdb/parser/tableref/pivotref.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/planner/extension_callback.hpp"
 
 namespace duckdb {
 
+// PSQL turns `A |> B |> C` into `FROM (FROM (A) B) C`: every stage is the tail
+// of a FROM-first SELECT whose first table is the result of the previous stage.
+// Rather than rewriting the query text, we extend DuckDB's PEG grammar so that
+// any SELECT (top-level, subquery, CTE, view, INSERT source, ...) can be
+// followed by pipe stages:
+//
+//   SelectStatementInternal <- PsqlDelimitedPipeline / PsqlPipeline
+//   PsqlDelimitedPipeline   <- '|' PsqlPipeline '|'
+//   PsqlPipeline            <- PsqlPipelineSource PsqlStage*
+//   PsqlPipelineSource      <- WithClause? SelectSetOpChain ResultModifiers?
+//   PsqlStage               <- '|>' PsqlStageQuery
+//   PsqlStageQuery          <- PsqlStageSetOpChain ResultModifiers?
+//   PsqlStageSetOpChain     <- PsqlStageIntersectChain SelectSetOpChainTail*
+//   PsqlStageIntersectChain <- PsqlStageSelect IntersectChainTail*
+//   PsqlStageSelect         <- PsqlStageFromSelect WhereClause? GroupByClause?
+//   HavingClause? WindowClause?
+//                              QualifyClause? SampleClause?
+//   PsqlStageFromSelect     <- PsqlStageFrom SelectClause?
+//   PsqlStageFrom           <- TableAlias? JoinOrPivot* (',' TableRef)*
+//
+// PsqlPipelineSource is the original definition of SelectStatementInternal, and
+// the PsqlStage* rules mirror the shape of the core rules SelectSetOpChain,
+// IntersectChain, SimpleSelect and FromSelectClause, so they reuse the core
+// transforms to build their results. Only PsqlStageFrom differs from the core
+// FROM clause: its first table is the stage input, a placeholder that
+// PsqlPipeline later fills with the result of the previous stage. The
+// PsqlDelimitedPipeline rule keeps the `(| ... |)` syntax of earlier PSQL
+// versions working.
+
+static vector<reference<ParseResult>> GetRepeatChildren(ListParseResult &list,
+                                                        idx_t child_idx) {
+  auto &optional = list.Child<OptionalParseResult>(child_idx);
+  if (!optional.HasResult()) {
+    return {};
+  }
+  return optional.GetResult().Cast<RepeatParseResult>().GetChildren();
+}
+
+static unique_ptr<SelectStatement> TakeStatement(TransformResultValue &value) {
+  auto statement = TryGetTransformResult<unique_ptr<SelectStatement>>(value);
+  if (!statement) {
+    throw InternalException("PSQL expected a SELECT statement");
+  }
+  return std::move(*statement);
+}
+
+//===--------------------------------------------------------------------===//
+// Stage input
+//===--------------------------------------------------------------------===//
+// The stage input is a subquery whose statement has no query node yet
+static unique_ptr<TableRef> CreateStageInput() {
+  return make_uniq<SubqueryRef>(make_uniq<SelectStatement>());
+}
+
+static optional_ptr<SubqueryRef> FindStageInput(TableRef &ref) {
+  switch (ref.type) {
+  case TableReferenceType::SUBQUERY: {
+    auto &subquery_ref = ref.Cast<SubqueryRef>();
+    if (subquery_ref.subquery && !subquery_ref.subquery->node) {
+      return subquery_ref;
+    }
+    return nullptr;
+  }
+  case TableReferenceType::JOIN:
+    return FindStageInput(*ref.Cast<JoinRef>().left);
+  case TableReferenceType::PIVOT:
+    return FindStageInput(*ref.Cast<PivotRef>().source);
+  default:
+    return nullptr;
+  }
+}
+
+// The stage input is the leftmost table of the first SELECT of the stage
+static optional_ptr<SubqueryRef> FindStageInput(QueryNode &node) {
+  switch (node.type) {
+  case QueryNodeType::SELECT_NODE:
+    return FindStageInput(*node.Cast<SelectNode>().from_table);
+  case QueryNodeType::SET_OPERATION_NODE:
+    return FindStageInput(*node.Cast<SetOperationNode>().children[0]);
+  default:
+    return nullptr;
+  }
+}
+
+//===--------------------------------------------------------------------===//
+// Transforms
+//===--------------------------------------------------------------------===//
+//! Transforms a single child of the matched rule and returns its result
+//! unchanged
+class PsqlForwardProcess final : public TransformProcess {
+public:
+  explicit PsqlForwardProcess(ParseResult &child_p) : child(child_p) {}
+
+  TransformStep Resume(unique_ptr<TransformResultValue> child_result) override {
+    if (child_result) {
+      return TransformStep::Complete(std::move(child_result));
+    }
+    return TransformStep::Child(child);
+  }
+
+private:
+  ParseResult &child;
+};
+
+static unique_ptr<TransformProcess>
+StartChoiceTransform(PEGTransformer &, ParseResult &parse_result) {
+  auto &list = parse_result.Cast<ListParseResult>();
+  return make_uniq<PsqlForwardProcess>(
+      list.Child<ChoiceParseResult>(0).GetResult());
+}
+
+static grammar_transform_process_function_t TransformChild(idx_t child_idx) {
+  return [child_idx](PEGTransformer &, ParseResult &parse_result) {
+    auto &list = parse_result.Cast<ListParseResult>();
+    return make_uniq<PsqlForwardProcess>(list.GetChild(child_idx));
+  };
+}
+
+static grammar_transform_process_function_t
+TransformWith(const TransformFrameOps &ops) {
+  return [&ops](PEGTransformer &transformer, ParseResult &parse_result) {
+    return make_uniq<GeneratedTransformProcess>(transformer, parse_result, ops);
+  };
+}
+
+//! Transforms a rule with the transform of a core rule of the same shape
+static grammar_transform_process_function_t
+TransformLike(const char *rule_name) {
+  return [rule_name](PEGTransformer &transformer, ParseResult &parse_result) {
+    return transformer.GetRule(rule_name).StartTransform(transformer,
+                                                         parse_result);
+  };
+}
+
+// SelectStatementInternal itself is replaced, so its core transform is not
+// available by rule name
+static const TransformFrameOps PSQL_PIPELINE_SOURCE_OPS = {
+    "PsqlPipelineSource",
+    &PEGTransformerFactory::InitializeSelectStatementInternalTrampoline,
+    &PEGTransformerFactory::FinalizeSelectStatementInternalTrampoline};
+
+// The core initializers of the following rules transform their children with
+// the core child rules, e.g. IntersectChain transforms its first child as a
+// SelectAtom. Our rules have the same shape, but different child rules, so they
+// only reuse the core finalizers, which build the result from the transformed
+// children.
+
+// Rule <- Head Tail*
+static void InitializeHeadTail(PEGTransformer &,
+                               GeneratedTransformProcess &process) {
+  auto &list = process.parse_result.Cast<ListParseResult>();
+  auto tails = GetRepeatChildren(list, 1);
+  process.ReserveChildSlots(1 + tails.size());
+  // pending children are transformed in reverse order of being pushed
+  for (idx_t i = tails.size(); i > 0; i--) {
+    process.PushChild({tails[i - 1].get()}, i);
+  }
+  process.PushChild({list.GetChild(0)}, 0);
+}
+
+static const TransformFrameOps PSQL_STAGE_SET_OP_CHAIN_OPS = {
+    "PsqlStageSetOpChain", InitializeHeadTail,
+    &PEGTransformerFactory::FinalizeSelectSetOpChainTrampoline};
+
+static const TransformFrameOps PSQL_STAGE_INTERSECT_CHAIN_OPS = {
+    "PsqlStageIntersectChain", InitializeHeadTail,
+    &PEGTransformerFactory::FinalizeIntersectChainTrampoline};
+
+// PsqlStageFromSelect <- PsqlStageFrom SelectClause?
+static void InitializeStageFromSelect(PEGTransformer &,
+                                      GeneratedTransformProcess &process) {
+  auto &list = process.parse_result.Cast<ListParseResult>();
+  process.ReserveChildSlots(2);
+  auto &select_clause = list.Child<OptionalParseResult>(1);
+  if (select_clause.HasResult()) {
+    process.PushChild({select_clause.GetResult()}, 1);
+  }
+  process.PushChild({list.GetChild(0)}, 0);
+}
+
+static const TransformFrameOps PSQL_STAGE_FROM_SELECT_OPS = {
+    "PsqlStageFromSelect", InitializeStageFromSelect,
+    &PEGTransformerFactory::FinalizeFromSelectClauseTrampoline};
+
+//! Transforms the pipeline source and stages in order, plugging each result
+//! into the input of the next stage
+class PsqlPipelineProcess final : public TransformProcess {
+public:
+  explicit PsqlPipelineProcess(ParseResult &parse_result) {
+    auto &list = parse_result.Cast<ListParseResult>();
+    queries.push_back(list.GetChild(0));
+    for (auto &stage : GetRepeatChildren(list, 1)) {
+      // every part of a stage is optional, but a stage that matched nothing is
+      // most likely a mistake
+      auto &stage_list = stage.get().Cast<ListParseResult>();
+      if (stage_list.GetChild(1).GetLocation().length == 0) {
+        throw ParserException(
+            stage_list.GetChild(0).GetLocation(),
+            "syntax error at or near \"|>\": empty pipe stage");
+      }
+      queries.push_back(stage);
+    }
+  }
+
+  TransformStep Resume(unique_ptr<TransformResultValue> child_result) override {
+    if (child_result) {
+      AddQuery(TakeStatement(*child_result));
+    }
+    if (next_query < queries.size()) {
+      return TransformStep::Child(queries[next_query++].get());
+    }
+    if (!cte_map.map.empty()) {
+      result->node->cte_map = std::move(cte_map);
+    }
+    return TransformStep::Complete(
+        make_uniq<TypedTransformResult<unique_ptr<SelectStatement>>>(
+            std::move(result)));
+  }
+
+private:
+  void AddQuery(unique_ptr<SelectStatement> statement) {
+    if (!result) {
+      result = std::move(statement);
+      if (queries.size() > 1) {
+        // a WITH clause in front of the pipeline is visible in all of its
+        // stages
+        cte_map = std::move(result->node->cte_map);
+        result->node->cte_map = CommonTableExpressionMap();
+      }
+      return;
+    }
+    auto input = FindStageInput(*statement->node);
+    if (!input) {
+      throw InternalException("PSQL stage has no input");
+    }
+    input->subquery = std::move(result);
+    result = std::move(statement);
+  }
+
+  vector<reference<ParseResult>> queries;
+  idx_t next_query = 0;
+  unique_ptr<SelectStatement> result;
+  CommonTableExpressionMap cte_map;
+};
+
+static unique_ptr<TransformProcess>
+StartPipelineTransform(PEGTransformer &, ParseResult &parse_result) {
+  return make_uniq<PsqlPipelineProcess>(parse_result);
+}
+
+// PsqlStageQuery <- PsqlStageSetOpChain ResultModifiers?
+static void InitializeStageQuery(PEGTransformer &,
+                                 GeneratedTransformProcess &process) {
+  auto &list = process.parse_result.Cast<ListParseResult>();
+  process.ReserveChildSlots(2);
+  auto &result_modifiers = list.Child<OptionalParseResult>(1);
+  if (result_modifiers.HasResult()) {
+    process.PushChild({result_modifiers.GetResult()}, 1);
+  }
+  process.PushChild({list.GetChild(0)}, 0);
+}
+
+static unique_ptr<TransformResultValue>
+FinalizeStageQuery(PEGTransformer &, GeneratedTransformProcess &process) {
+  auto statement = process.TakeResult<unique_ptr<SelectStatement>>(0);
+  if (process.child_results[1]) {
+    auto result_modifiers =
+        process.TakeResult<vector<unique_ptr<ResultModifier>>>(1);
+    for (auto &result_modifier : result_modifiers) {
+      statement->node->modifiers.push_back(std::move(result_modifier));
+    }
+  }
+  return make_uniq<TypedTransformResult<unique_ptr<SelectStatement>>>(
+      std::move(statement));
+}
+
+static const TransformFrameOps PSQL_STAGE_QUERY_OPS = {
+    "PsqlStageQuery", InitializeStageQuery, FinalizeStageQuery};
+
+// PsqlStageFrom <- TableAlias? JoinOrPivot* (',' TableRef)*
+// Child slots: [0] alias, [1, 1 + #joins) joins, [1 + #joins, 1 + #joins +
+// #tables) tables
+static void InitializeStageFrom(PEGTransformer &,
+                                GeneratedTransformProcess &process) {
+  auto &list = process.parse_result.Cast<ListParseResult>();
+  auto joins = GetRepeatChildren(list, 1);
+  auto tables = GetRepeatChildren(list, 2);
+  process.ReserveChildSlots(1 + joins.size() + tables.size());
+  // pending children are transformed in reverse order of being pushed
+  for (idx_t i = tables.size(); i > 0; i--) {
+    auto &table_ref = tables[i - 1].get().Cast<ListParseResult>().GetChild(1);
+    process.PushChild({table_ref}, 1 + joins.size() + i - 1);
+  }
+  for (idx_t i = joins.size(); i > 0; i--) {
+    process.PushChild({joins[i - 1].get()}, 1 + i - 1);
+  }
+  auto &table_alias = list.Child<OptionalParseResult>(0);
+  if (table_alias.HasResult()) {
+    process.PushChild({table_alias.GetResult()}, 0);
+  }
+}
+
+static unique_ptr<TransformResultValue>
+FinalizeStageFrom(PEGTransformer &, GeneratedTransformProcess &process) {
+  auto &list = process.parse_result.Cast<ListParseResult>();
+  auto join_count = GetRepeatChildren(list, 1).size();
+  auto table_count = GetRepeatChildren(list, 2).size();
+
+  auto result = CreateStageInput();
+  if (process.child_results[0]) {
+    auto table_alias = process.TakeResult<TableAlias>(0);
+    result->alias = std::move(table_alias.name);
+    result->column_name_alias = std::move(table_alias.column_name_alias);
+  }
+  for (idx_t i = 0; i < join_count; i++) {
+    auto join_or_pivot = process.TakeResult<unique_ptr<TableRef>>(1 + i);
+    if (join_or_pivot->type == TableReferenceType::JOIN) {
+      join_or_pivot->Cast<JoinRef>().left = std::move(result);
+    } else if (join_or_pivot->type == TableReferenceType::PIVOT) {
+      join_or_pivot->Cast<PivotRef>().source = std::move(result);
+    } else {
+      throw NotImplementedException("Unsupported TableRef type encountered: %s",
+                                    EnumUtil::ToString(join_or_pivot->type));
+    }
+    result = std::move(join_or_pivot);
+  }
+  for (idx_t i = 0; i < table_count; i++) {
+    auto cross_product = make_uniq<JoinRef>();
+    cross_product->left = std::move(result);
+    cross_product->right =
+        process.TakeResult<unique_ptr<TableRef>>(1 + join_count + i);
+    cross_product->ref_type = JoinRefType::CROSS;
+    cross_product->is_implicit = true;
+    result = std::move(cross_product);
+  }
+  return make_uniq<TypedTransformResult<unique_ptr<TableRef>>>(
+      std::move(result));
+}
+
+static const TransformFrameOps PSQL_STAGE_FROM_OPS = {
+    "PsqlStageFrom", InitializeStageFrom, FinalizeStageFrom};
+
+//===--------------------------------------------------------------------===//
+// Grammar extension
+//===--------------------------------------------------------------------===//
+class PsqlGrammarExtension final : public GrammarExtension {
+public:
+  PsqlGrammarExtension()
+      : GrammarExtension("psql",
+                         "Piped SQL: `A |> B` evaluates `FROM (A) B`, see "
+                         "https://github.com/ywelsch/duckdb-psql") {}
+
+  vector<GrammarChange> GetChanges() const override {
+    vector<GrammarChange> changes;
+    changes.push_back(GrammarChange::ReplaceRule(
+        "SelectStatementInternal <- PsqlDelimitedPipeline / PsqlPipeline",
+        StartChoiceTransform));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlDelimitedPipeline <- '|' PsqlPipeline '|'", TransformChild(1)));
+    changes.push_back(
+        GrammarChange::AddRule("PsqlPipeline <- PsqlPipelineSource PsqlStage*",
+                               StartPipelineTransform));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlPipelineSource <- WithClause? SelectSetOpChain ResultModifiers?",
+        TransformWith(PSQL_PIPELINE_SOURCE_OPS)));
+    changes.push_back(GrammarChange::AddRule("PsqlStage <- '|>' PsqlStageQuery",
+                                             TransformChild(1)));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageQuery <- PsqlStageSetOpChain ResultModifiers?",
+        TransformWith(PSQL_STAGE_QUERY_OPS)));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageSetOpChain <- PsqlStageIntersectChain SelectSetOpChainTail*",
+        TransformWith(PSQL_STAGE_SET_OP_CHAIN_OPS)));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageIntersectChain <- PsqlStageSelect IntersectChainTail*",
+        TransformWith(PSQL_STAGE_INTERSECT_CHAIN_OPS)));
+    changes.push_back(
+        GrammarChange::AddRule("PsqlStageSelect <- PsqlStageFromSelect "
+                               "WhereClause? GroupByClause? HavingClause? "
+                               "WindowClause? QualifyClause? SampleClause?",
+                               TransformLike("SimpleSelect")));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageFromSelect <- PsqlStageFrom SelectClause?",
+        TransformWith(PSQL_STAGE_FROM_SELECT_OPS)));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageFrom <- TableAlias? JoinOrPivot* (',' TableRef)*",
+        TransformWith(PSQL_STAGE_FROM_OPS)));
+    return changes;
+  }
+};
+
+//===--------------------------------------------------------------------===//
+// Enabling psql
+//===--------------------------------------------------------------------===//
+// Grammar extensions are activated per connection with the
+// active_grammar_extensions setting. Loading psql activates it on all
+// connections, existing and future, and CALL psql_enable() activates it again
+// on the calling connection, e.g. after RESET active_grammar_extensions.
+
+//! Adds psql to the active grammar extensions of a connection, keeping any
+//! other active grammar extensions. Must run on the thread that uses the
+//! connection, since the setting is not synchronized.
+static void EnablePsql(ClientContext &context) {
+  auto active = ActiveGrammarExtensionsSetting::GetSetting(context);
+  vector<Value> extensions;
+  for (auto &extension : ListValue::GetChildren(active)) {
+    if (StringUtil::CIEquals(StringValue::Get(extension), "psql")) {
+      return;
+    }
+    extensions.push_back(extension);
+  }
+  extensions.emplace_back("psql");
+  ActiveGrammarExtensionsSetting::SetLocal(
+      context, Value::LIST(LogicalType::VARCHAR, std::move(extensions)));
+}
+
+static unique_ptr<FunctionData>
+PsqlEnableBind(ClientContext &, TableFunctionBindInput &,
+               vector<LogicalType> &return_types, vector<Identifier> &names) {
+  return_types.emplace_back(LogicalType::BOOLEAN);
+  names.emplace_back("Success");
+  return nullptr;
+}
+
+static void PsqlEnableFunction(ClientContext &context, TableFunctionInput &,
+                               DataChunk &) {
+  EnablePsql(context);
+}
+
+//! Connections opened after loading psql enable it while being opened
+class PsqlConnectionCallback final : public ExtensionCallback {
+public:
+  void OnConnectionOpened(ClientContext &context) override {
+    EnablePsql(context);
+  }
+};
+
+static constexpr const char *PSQL_ENABLE_STATE = "psql_enable";
+
+//! Connections that are open while loading psql may be running a query on
+//! another thread, so they enable psql at the end of their current or next
+//! query. For the connection that runs LOAD, that is the LOAD itself.
+class PsqlEnableAtQueryEnd final : public ClientContextState {
+public:
+  using ClientContextState::QueryEnd;
+
+  void QueryEnd(ClientContext &context) override {
+    context.registered_state->Remove(PSQL_ENABLE_STATE);
+    EnablePsql(context);
+  }
+};
+
 static void LoadInternal(ExtensionLoader &loader) {
-  auto &instance = loader.GetDatabaseInstance();
-  auto &config = DBConfig::GetConfig(instance);
-  PsqlParserExtension psql_parser;
-  config.parser_extensions.push_back(psql_parser);
-  config.operator_extensions.push_back(make_uniq<PsqlOperatorExtension>());
+  auto &db = loader.GetDatabaseInstance();
+  GrammarExtension::Register(db, make_shared_ptr<PsqlGrammarExtension>());
+  loader.RegisterFunction(
+      TableFunction("psql_enable", {}, PsqlEnableFunction, PsqlEnableBind));
+  // register the callback before listing the connections, so that a
+  // connection opened in between is not missed
+  ExtensionCallback::Register(DBConfig::GetConfig(db),
+                              make_shared_ptr<PsqlConnectionCallback>());
+  for (auto &context : ConnectionManager::Get(db).GetConnectionList()) {
+    context->registered_state->GetOrCreate<PsqlEnableAtQueryEnd>(
+        PSQL_ENABLE_STATE);
+  }
 }
 
 void PsqlExtension::Load(ExtensionLoader &loader) { LoadInternal(loader); }
-
-// Rewrite A | B | C to FROM ( FROM ( A ) B ) C
-bool transform_block(const std::string &block, std::stringstream &ss) {
-  std::string command;
-  duckdb_re2::StringPiece input(block);
-  size_t count = 0;
-  RE2::Options options;
-  options.set_dot_nl(true);
-  RE2 re("(.*?)\\s+[|][>]\\s+", options);
-  std::stringstream intermediates;
-  while (RE2::Consume(&input, re, &command)) {
-    // printf("Command: %s\n", command.c_str());
-    intermediates << command << " )";
-    ++count;
-  }
-  for (size_t i = 0; i < count; ++i) {
-    ss << "FROM "
-       << "( ";
-  }
-  ss << intermediates.str();
-  command = input.ToString();
-  ss << command;
-  return count > 0;
-}
-
-ParserExtensionParseResult psql_parse(ParserExtensionInfo *,
-                                      const std::string &query) {
-  std::stringstream ss;
-
-  // Identify blocks, delimited by "(|" and "|)"
-  RE2::Options options;
-  options.set_dot_nl(true);
-  RE2 block_re("(.*?)[(][|](.*?)[|][)]", options);
-  duckdb_re2::StringPiece input(query);
-  std::string pre_block_command;
-  std::string block_command;
-  bool psql_found = false;
-
-  while (RE2::Consume(&input, block_re, &pre_block_command, &block_command)) {
-    psql_found = true;
-    transform_block(pre_block_command, ss);
-    ss << "(";
-    transform_block(block_command, ss);
-    ss << ")";
-  }
-  std::string post_block_command;
-  post_block_command = input.ToString();
-  psql_found |= transform_block(post_block_command, ss);
-  std::string result = ss.str();
-
-  if (!psql_found) {
-    // throw original exception message
-    return ParserExtensionParseResult();
-  }
-
-  // printf("Result: %s\n", result.c_str());
-
-  Parser parser; // TODO Pass (ClientContext.GetParserOptions());
-  parser.ParseQuery(result);
-  auto statements = std::move(parser.statements);
-
-  return ParserExtensionParseResult(
-      make_uniq_base<ParserExtensionParseData, PsqlParseData>(
-          std::move(statements[0])));
-}
-
-ParserExtensionPlanResult
-psql_plan(ParserExtensionInfo *, ClientContext &context,
-          unique_ptr<ParserExtensionParseData> parse_data) {
-  // We stash away the ParserExtensionParseData before throwing an exception
-  // here. This allows the planning to be picked up by psql_bind instead, but
-  // we're not losing important context.
-  auto psql_state = make_shared_ptr<PsqlState>(std::move(parse_data));
-  context.registered_state->Remove("psql");
-  context.registered_state->Insert("psql", psql_state);
-  throw BinderException("Use psql_bind instead");
-}
-
-BoundStatement psql_bind(ClientContext &context, Binder &binder,
-                         OperatorExtensionInfo *info, SQLStatement &statement) {
-  switch (statement.type) {
-  case StatementType::EXTENSION_STATEMENT: {
-    auto &extension_statement = dynamic_cast<ExtensionStatement &>(statement);
-    if (extension_statement.extension.parse_function == psql_parse) {
-      auto lookup = context.registered_state->Get<PsqlState>("psql");
-      if (lookup) {
-        auto psql_state = (PsqlState *)lookup.get();
-        auto psql_binder = Binder::CreateBinder(context, &binder);
-        auto psql_parse_data =
-            dynamic_cast<PsqlParseData *>(psql_state->parse_data.get());
-        return psql_binder->Bind(*(psql_parse_data->statement));
-      }
-      throw BinderException("Registered state not found");
-    }
-  }
-  default:
-    // No-op empty
-    return {};
-  }
-}
 
 } // namespace duckdb
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(psql, loader) { LoadInternal(loader); }
+DUCKDB_CPP_EXTENSION_ENTRY(psql, loader) { duckdb::LoadInternal(loader); }
 }
 
 #ifndef DUCKDB_EXTENSION_MAIN
