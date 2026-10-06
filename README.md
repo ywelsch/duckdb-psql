@@ -107,7 +107,32 @@ FROM (
   D
 ```
 
-A `WITH` clause in front of a pipeline is visible in all of its stages.
+A `WITH` clause in front of a pipeline is visible in all of its stages. Table aliases that a stage introduces, for example with `JOIN ... AS t`, are only visible within that stage, as the next stage reads the result of the previous one as a subquery. To refer to the result of a stage by name, give it an alias with a stage of its own: `|> as t` names the input of the following stages.
+
+## BigQuery pipe syntax
+
+Most operators of [BigQuery's pipe syntax](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/pipe-syntax) already are pipe stages in PSQL, such as `SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN`, `UNION`/`INTERSECT`/`EXCEPT` with a single parenthesized query, `PIVOT`, `UNPIVOT` and `TABLESAMPLE`. PSQL also supports the following operators, which map directly to DuckDB's `SELECT`:
+
+| Operator | Equivalent DuckDB stage |
+|----------|-------------------------|
+| `\|> extend expr [as alias], ... [window ...]` | `\|> select *, expr [as alias], ... [window ...]` |
+| `\|> set column = expr, ...` | `\|> select * replace (expr as column, ...)` |
+| `\|> drop column, ...` | `\|> select * exclude (column, ...)` |
+| `\|> rename column [as] new_name, ...` | `\|> select * rename (column as new_name, ...)` |
+| `\|> distinct` | `\|> select distinct *` |
+| `\|> as alias` | gives the input of the following stages the alias |
+
+```sql
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+extend total * 0.8 as income |>
+drop billing_address, billing_postal_code |>
+rename billing_city as city |>
+select city, sum(income) as income group by all |>
+order by income desc |>
+limit 3;
+```
+
+Operators that DuckDB's SQL covers with a native form are not supported: instead of `AGGREGATE`, use `select ... group by all` (and `order by all`), instead of a `WITH` stage, put the `WITH` clause in front of the pipeline, instead of set operations with several comma-separated queries, chain the set operations, and instead of `CALL f(...)`, call the table function on a subquery: `from f((from ... |> ...))`.
 
 ## Limitations
 
