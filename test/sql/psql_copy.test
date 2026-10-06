@@ -1,0 +1,97 @@
+# name: test/sql/psql_copy.test
+# description: write the result of a pipeline to a file with |> [COPY] TO
+# group: [sql]
+
+require psql
+
+require parquet
+
+statement ok
+CALL psql_enable();
+
+statement ok
+CREATE TABLE t1(i INTEGER, j INTEGER);
+
+statement ok
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
+
+query I
+from t1 |> where i > 1 |> select i, j |> to '__TEST_DIR__/psql_out.csv';
+----
+2
+
+query II
+from '__TEST_DIR__/psql_out.csv' order by all;
+----
+2	20
+3	30
+
+# COPY is optional, and the file format follows from the file extension
+query I
+from t1 |> copy to '__TEST_DIR__/psql_out.parquet';
+----
+3
+
+query II
+select count(*), sum(j) from '__TEST_DIR__/psql_out.parquet';
+----
+3	60
+
+# COPY options
+statement ok
+from t1 |> where i = 3 |> to '__TEST_DIR__/psql_options.csv' (header false, delimiter '|');
+
+query II
+from read_csv('__TEST_DIR__/psql_options.csv', header = false, delim = '|');
+----
+3	30
+
+# a WITH clause in front of the pipeline is visible in all stages
+statement ok
+with x as (from t1 |> where i >= 2) from x |> join x as y using (i) |> select i |> to '__TEST_DIR__/psql_with.csv';
+
+query I
+from '__TEST_DIR__/psql_with.csv' order by all;
+----
+2
+3
+
+statement ok
+prepare p as from t1 |> where i > ? |> to '__TEST_DIR__/psql_prepared.csv';
+
+statement ok
+execute p(2);
+
+query II
+from '__TEST_DIR__/psql_prepared.csv';
+----
+3	30
+
+# COPY without TO is still a table alias
+query I
+from t1 |> copy select copy.i order by all;
+----
+1
+2
+3
+
+# writing to a file is a statement, not a query
+statement error
+select * from (from t1 |> to '__TEST_DIR__/psql_error.csv');
+----
+|> TO is only supported as the last stage of a top-level query
+
+statement error
+from t1 |> to '__TEST_DIR__/psql_error.csv' |> select i;
+----
+|> TO is only supported as the last stage of a top-level query
+
+statement error
+create view v as from t1 |> to '__TEST_DIR__/psql_error.csv';
+----
+|> TO is only supported as the last stage of a top-level query
+
+statement error
+from t1 |> to;
+----
+syntax error at or near ";"

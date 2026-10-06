@@ -71,6 +71,21 @@ select first_name, last_name;
 
 Earlier versions of PSQL required piped sub-expressions to be delimited with `(|` and `|)`. This syntax is still accepted, but no longer needed.
 
+A pipeline can write its result to a file with a final `|> to` stage (or `|> copy to`), a short-hand for DuckDB's [`COPY ... TO`](https://duckdb.org/docs/lts/sql/statements/copy#copy--to). The file format follows from the file extension, and `COPY` options can be given in parentheses:
+
+```sql
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+where total > 10 |>
+select customer_id, total |>
+to 'large_invoices.parquet';
+
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' |>
+select first_name, last_name |>
+to 'names.csv' (header false, delimiter '|');
+```
+
+This is equivalent to `COPY (pipeline) TO 'file' (options)`, so `|> to` has to be the last stage of a top-level query.
+
 ## How does it work?
 
 PSQL extends the grammar of DuckDB's PEG parser, so that every query can be followed by pipe stages. A pipe stage is anything that can follow the first table of a `FROM`-first query: a table alias, joins, `SELECT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `QUALIFY`, set operations, `ORDER BY`, `LIMIT`, ... It is parsed as if the pipe input was written in that position, so

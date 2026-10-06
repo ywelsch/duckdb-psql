@@ -28,16 +28,19 @@ namespace duckdb {
 // any SELECT (top-level, subquery, CTE, view, INSERT source, ...) can be
 // followed by pipe stages:
 //
+//   SelectStatement         <- SelectStatementInternal
 //   SelectStatementInternal <- PsqlDelimitedPipeline / PsqlPipeline
 //   PsqlDelimitedPipeline   <- '|' PsqlPipeline '|'
 //   PsqlPipeline            <- PsqlPipelineSource PsqlStage*
 //   PsqlPipelineSource      <- WithClause? SelectSetOpChain ResultModifiers?
-//   PsqlStage               <- '|>' PsqlStageQuery
+//   PsqlStage               <- '|>' PsqlStageOperation
+//   PsqlStageOperation      <- PsqlCopyTo / PsqlStageQuery
+//   PsqlCopyTo              <- 'COPY'? 'TO' CopyFileName CopyOptions?
 //   PsqlStageQuery          <- PsqlStageSetOpChain ResultModifiers?
 //   PsqlStageSetOpChain     <- PsqlStageIntersectChain SelectSetOpChainTail*
 //   PsqlStageIntersectChain <- PsqlStageSelect IntersectChainTail*
-//   PsqlStageSelect         <- PsqlStageFromSelect WhereClause? GroupByClause?
-//   HavingClause? WindowClause?
+//   PsqlStageSelect         <- PsqlStageFromSelect WhereClause?
+//                              GroupByClause? HavingClause? WindowClause?
 //                              QualifyClause? SampleClause?
 //   PsqlStageFromSelect     <- PsqlStageFrom SelectClause?
 //   PsqlStageFrom           <- TableAlias? JoinOrPivot* (',' TableRef)*
@@ -50,6 +53,9 @@ namespace duckdb {
 // PsqlPipeline later fills with the result of the previous stage. The
 // PsqlDelimitedPipeline rule keeps the `(| ... |)` syntax of earlier PSQL
 // versions working.
+//
+// A top-level pipeline can end with `|> [COPY] TO 'file' (options)`, which
+// turns the SELECT statement into `COPY (pipeline) TO 'file' (options)`.
 
 static vector<reference<ParseResult>> GetRepeatChildren(ListParseResult &list,
                                                         idx_t child_idx) {
@@ -60,12 +66,16 @@ static vector<reference<ParseResult>> GetRepeatChildren(ListParseResult &list,
   return optional.GetResult().Cast<RepeatParseResult>().GetChildren();
 }
 
-static unique_ptr<SelectStatement> TakeStatement(TransformResultValue &value) {
-  auto statement = TryGetTransformResult<unique_ptr<SelectStatement>>(value);
-  if (!statement) {
-    throw InternalException("PSQL expected a SELECT statement");
+static bool IsRule(const ParseResult &parse_result, const char *rule_name) {
+  return StringUtil::CIEquals(parse_result.name, rule_name);
+}
+
+template <class T> static T TakeResult(TransformResultValue &value) {
+  auto result = TryGetTransformResult<T>(value);
+  if (!result) {
+    throw InternalException("PSQL received an unexpected transform result");
   }
-  return std::move(*statement);
+  return std::move(*result);
 }
 
 //===--------------------------------------------------------------------===//
@@ -207,45 +217,92 @@ static const TransformFrameOps PSQL_STAGE_FROM_SELECT_OPS = {
     &PEGTransformerFactory::FinalizeFromSelectClauseTrampoline};
 
 //! Transforms the pipeline source and stages in order, plugging each result
-//! into the input of the next stage
+//! into the input of the next stage. At the top level, a final `|> TO` stage
+//! turns the pipeline into a COPY statement.
 class PsqlPipelineProcess final : public TransformProcess {
 public:
-  explicit PsqlPipelineProcess(ParseResult &parse_result) {
+  PsqlPipelineProcess(PEGTransformer &transformer_p, ParseResult &parse_result,
+                      bool top_level_p)
+      : transformer(transformer_p), top_level(top_level_p) {
     auto &list = parse_result.Cast<ListParseResult>();
-    queries.push_back(list.GetChild(0));
-    for (auto &stage : GetRepeatChildren(list, 1)) {
+    children.push_back(list.GetChild(0));
+    auto stages = GetRepeatChildren(list, 1);
+    for (idx_t i = 0; i < stages.size(); i++) {
+      // PsqlStage <- '|>' PsqlStageOperation
+      auto &stage = stages[i].get().Cast<ListParseResult>();
+      auto &pipe_location = stage.GetChild(0);
+      auto &operation = stage.Child<ListParseResult>(1)
+                            .Child<ChoiceParseResult>(0)
+                            .GetResult();
+      if (IsRule(operation, "PsqlCopyTo")) {
+        // writing to a file is a statement, not a query
+        if (!top_level || i + 1 < stages.size()) {
+          throw ParserException(pipe_location.GetLocation(),
+                                "|> TO is only supported as the last stage of "
+                                "a top-level query");
+        }
+        copy_to = operation.Cast<ListParseResult>();
+        continue;
+      }
       // every part of a stage is optional, but a stage that matched nothing is
       // most likely a mistake
-      auto &stage_list = stage.get().Cast<ListParseResult>();
-      if (stage_list.GetChild(1).GetLocation().length == 0) {
+      if (operation.GetLocation().length == 0) {
         throw ParserException(
-            stage_list.GetChild(0).GetLocation(),
+            pipe_location.GetLocation(),
             "syntax error at or near \"|>\": empty pipe stage");
       }
-      queries.push_back(stage);
+      children.push_back(operation);
+    }
+    query_count = children.size();
+    if (copy_to) {
+      // PsqlCopyTo <- 'COPY'? 'TO' CopyFileName CopyOptions?
+      children.push_back(copy_to->GetChild(2));
+      auto &copy_options = copy_to->Child<OptionalParseResult>(3);
+      if (copy_options.HasResult()) {
+        children.push_back(copy_options.GetResult());
+      }
     }
   }
 
   TransformStep Resume(unique_ptr<TransformResultValue> child_result) override {
     if (child_result) {
-      AddQuery(TakeStatement(*child_result));
+      auto child_idx = next_child - 1;
+      if (child_idx < query_count) {
+        AddQuery(TakeResult<unique_ptr<SelectStatement>>(*child_result));
+      } else if (child_idx == query_count) {
+        file_name = TakeResult<unique_ptr<ParsedExpression>>(*child_result);
+      } else {
+        copy_options = TakeResult<vector<GenericCopyOption>>(*child_result);
+      }
     }
-    if (next_query < queries.size()) {
-      return TransformStep::Child(queries[next_query++].get());
+    if (next_child < children.size()) {
+      return TransformStep::Child(children[next_child++].get());
     }
     if (!cte_map.map.empty()) {
       result->node->cte_map = std::move(cte_map);
     }
+    if (!top_level) {
+      return TransformStep::Complete(
+          make_uniq<TypedTransformResult<unique_ptr<SelectStatement>>>(
+              std::move(result)));
+    }
+    unique_ptr<SQLStatement> statement;
+    if (copy_to) {
+      statement = PEGTransformerFactory::TransformCopySelect(
+          transformer, std::move(result), std::move(file_name), copy_options);
+    } else {
+      statement = std::move(result);
+    }
     return TransformStep::Complete(
-        make_uniq<TypedTransformResult<unique_ptr<SelectStatement>>>(
-            std::move(result)));
+        make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(
+            std::move(statement)));
   }
 
 private:
   void AddQuery(unique_ptr<SelectStatement> statement) {
     if (!result) {
       result = std::move(statement);
-      if (queries.size() > 1) {
+      if (query_count > 1) {
         // a WITH clause in front of the pipeline is visible in all of its
         // stages
         cte_map = std::move(result->node->cte_map);
@@ -261,15 +318,37 @@ private:
     result = std::move(statement);
   }
 
-  vector<reference<ParseResult>> queries;
-  idx_t next_query = 0;
+  PEGTransformer &transformer;
+  //! Whether the pipeline is a top-level SELECT statement
+  bool top_level;
+  //! The pipeline source and query stages, followed by the file name and
+  //! options of the `|> TO` stage
+  vector<reference<ParseResult>> children;
+  idx_t query_count = 0;
+  idx_t next_child = 0;
+  optional_ptr<ListParseResult> copy_to;
   unique_ptr<SelectStatement> result;
   CommonTableExpressionMap cte_map;
+  unique_ptr<ParsedExpression> file_name;
+  optional<vector<GenericCopyOption>> copy_options;
 };
 
 static unique_ptr<TransformProcess>
-StartPipelineTransform(PEGTransformer &, ParseResult &parse_result) {
-  return make_uniq<PsqlPipelineProcess>(parse_result);
+StartPipelineTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+  return make_uniq<PsqlPipelineProcess>(transformer, parse_result, false);
+}
+
+// SelectStatement <- SelectStatementInternal
+static unique_ptr<TransformProcess>
+StartStatementTransform(PEGTransformer &transformer,
+                        ParseResult &parse_result) {
+  auto &select = parse_result.Cast<ListParseResult>().GetChild(0);
+  auto pipeline =
+      &select.Cast<ListParseResult>().Child<ChoiceParseResult>(0).GetResult();
+  if (IsRule(*pipeline, "PsqlDelimitedPipeline")) {
+    pipeline = &pipeline->Cast<ListParseResult>().GetChild(1);
+  }
+  return make_uniq<PsqlPipelineProcess>(transformer, *pipeline, true);
 }
 
 // PsqlStageQuery <- PsqlStageSetOpChain ResultModifiers?
@@ -377,6 +456,8 @@ public:
   vector<GrammarChange> GetChanges() const override {
     vector<GrammarChange> changes;
     changes.push_back(GrammarChange::ReplaceRule(
+        "SelectStatement <- SelectStatementInternal", StartStatementTransform));
+    changes.push_back(GrammarChange::ReplaceRule(
         "SelectStatementInternal <- PsqlDelimitedPipeline / PsqlPipeline",
         StartChoiceTransform));
     changes.push_back(GrammarChange::AddRule(
@@ -387,8 +468,13 @@ public:
     changes.push_back(GrammarChange::AddRule(
         "PsqlPipelineSource <- WithClause? SelectSetOpChain ResultModifiers?",
         TransformWith(PSQL_PIPELINE_SOURCE_OPS)));
-    changes.push_back(GrammarChange::AddRule("PsqlStage <- '|>' PsqlStageQuery",
-                                             TransformChild(1)));
+    // PsqlPipelineProcess transforms the parts of these rules
+    changes.push_back(
+        GrammarChange::AddRule("PsqlStage <- '|>' PsqlStageOperation"));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlStageOperation <- PsqlCopyTo / PsqlStageQuery"));
+    changes.push_back(GrammarChange::AddRule(
+        "PsqlCopyTo <- 'COPY'? 'TO' CopyFileName CopyOptions?"));
     changes.push_back(GrammarChange::AddRule(
         "PsqlStageQuery <- PsqlStageSetOpChain ResultModifiers?",
         TransformWith(PSQL_STAGE_QUERY_OPS)));
