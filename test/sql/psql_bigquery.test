@@ -40,6 +40,13 @@ from produce |> extend sales * 2 as doubled |> extend doubled + 1 as more |> sel
 ----
 17
 
+# named windows of an EXTEND are only visible in that EXTEND
+query III
+select a, b, sum(a) over w as s from (select 1 as a union all select 2 |> extend sum(a) over w as b window w as ()) window w as (order by a) order by a;
+----
+1	3	1
+2	3	3
+
 # SET
 query II
 select 1 as x, 11 as y union all select 2, 22 |> set x = x * x, y = 3 |> order by all;

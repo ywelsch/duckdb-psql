@@ -388,9 +388,11 @@ static const TransformFrameOps PSQL_STAGE_FROM_OPS = {
 // |> EXTEND expression [[AS] alias] [, ...] [WINDOW name AS window_spec, ...]
 // is SELECT *, expression [[AS] alias] [, ...] FROM <input> [WINDOW ...]
 // PsqlExtend <- 'EXTEND' TargetList WindowClause?
-static void InitializeExtend(PEGTransformer &,
+static void InitializeExtend(PEGTransformer &transformer,
                              GeneratedTransformProcess &process) {
   auto &list = process.parse_result.Cast<ListParseResult>();
+  // named windows are only visible in their own EXTEND, as in a SELECT
+  transformer.window_clauses.emplace_back();
   // named windows have to be known before transforming the expressions
   PushChildren(process, {GetOptional(list, 2), list.GetChild(1)});
 }
@@ -404,7 +406,7 @@ FinalizeExtend(PEGTransformer &transformer,
   }
   auto expressions =
       process.TakeResult<vector<unique_ptr<ParsedExpression>>>(1);
-  transformer.window_clauses.clear();
+  transformer.window_clauses.pop_back();
   auto node = CreateStageSelect();
   for (auto &expression : expressions) {
     node->select_list.push_back(std::move(expression));
