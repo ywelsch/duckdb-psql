@@ -53,26 +53,47 @@ which returns:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-Pipes can also be used in sub-expression, by using a special syntax to delimit start and end of pipelines:
+Pipelines can be used anywhere a query can appear: in subqueries, CTEs, views, `CREATE TABLE ... AS`, `INSERT INTO ...`, and so on:
 
 ```sql
-create view invoices as (|
+create view invoices as
   from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
   where invoice_date >= date '1970-01-16' |>
   select
+    *,
     0.8 as transaction_fees,
-    total - transaction_fees as income
-|);
+    total - transaction_fees as income;
+
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' |>
+where customer_id in (from invoices |> where income > 20 |> select customer_id) |>
+select first_name, last_name;
 ```
+
+Earlier versions of PSQL required piped sub-expressions to be delimited with `(|` and `|)`. This syntax is still accepted, but no longer needed.
+
+A pipeline can write its result to a file with a final `|> to` stage (or `|> copy to`), a short-hand for DuckDB's [`COPY ... TO`](https://duckdb.org/docs/lts/sql/statements/copy#copy--to). The file format follows from the file extension, and `COPY` options can be given in parentheses:
+
+```sql
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+where total > 10 |>
+select customer_id, total |>
+to 'large_invoices.parquet';
+
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' |>
+select first_name, last_name |>
+to 'names.csv' (header false, delimiter '|');
+```
+
+This is equivalent to `COPY (pipeline) TO 'file' (options)`, so `|> to` has to be the last stage of a top-level query.
 
 ## How does it work?
 
-The underlying engine just does a simple syntactic transformation of the query, rewriting pipes
+PSQL extends the grammar of DuckDB's PEG parser, so that every query can be followed by pipe stages. A pipe stage is anything that can follow the first table of a `FROM`-first query: a table alias, joins, `SELECT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `QUALIFY`, set operations, `ORDER BY`, `LIMIT`, ... It is parsed as if the pipe input was written in that position, so
 
 ```sql
 A |> B |> C |> D
 ```
-to
+is equivalent to
 ```sql
 FROM (
 FROM (
@@ -86,9 +107,38 @@ FROM (
   D
 ```
 
+A `WITH` clause in front of a pipeline is visible in all of its stages. Table aliases that a stage introduces, for example with `JOIN ... AS t`, are only visible within that stage, as the next stage reads the result of the previous one as a subquery. To refer to the result of a stage by name, give it an alias with a stage of its own: `|> as t` names the input of the following stages.
+
+## BigQuery pipe syntax
+
+Most operators of [BigQuery's pipe syntax](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/pipe-syntax) already are pipe stages in PSQL, such as `SELECT`, `WHERE`, `ORDER BY`, `LIMIT`, `JOIN`, `UNION`/`INTERSECT`/`EXCEPT` with a single parenthesized query, `PIVOT`, `UNPIVOT` and `TABLESAMPLE`. PSQL also supports the following operators, which map directly to DuckDB's `SELECT`:
+
+| Operator | Equivalent DuckDB stage |
+|----------|-------------------------|
+| `\|> extend expr [as alias], ... [window ...]` | `\|> select *, expr [as alias], ... [window ...]` |
+| `\|> set column = expr, ...` | `\|> select * replace (expr as column, ...)` |
+| `\|> drop column, ...` | `\|> select * exclude (column, ...)` |
+| `\|> rename column [as] new_name, ...` | `\|> select * rename (column as new_name, ...)` |
+| `\|> distinct` | `\|> select distinct *` |
+| `\|> as alias` | gives the input of the following stages the alias |
+
+```sql
+from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
+extend total * 0.8 as income |>
+drop billing_address, billing_postal_code |>
+rename billing_city as city |>
+select city, sum(income) as income group by all |>
+order by income desc |>
+limit 3;
+```
+
+Operators that DuckDB's SQL covers with a native form are not supported: instead of `AGGREGATE`, use `select ... group by all` (and `order by all`), instead of a `WITH` stage, put the `WITH` clause in front of the pipeline, instead of set operations with several comma-separated queries, chain the set operations, and instead of `CALL f(...)`, call the table function on a subquery: `from f((from ... |> ...))`.
+
 ## Limitations
 
-This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages. As it is just implemented as a simple pre-processing step using quick and dirty regex subsitutions, it is unaware of the scoping rules of SQL. It has a special syntax for piped sub-expressions (surrounded by `(|` and `|)`) and does not allow arbitrary nesting of piped sub-expressions.
+This is mainly an experiment at simplifying SQL and nowhere as feature-complete as some of the piped language alternatives. Its main advantage is that is has all the power and expressivity of DuckDB's SQL, while gaining some of the benefits of piped languages.
+
+PSQL requires DuckDB 2.0 or later, which made the parser extensible. Earlier versions of PSQL for DuckDB 1.x implemented the syntax as a text substitution on the query, which was unaware of the scoping rules of SQL and did not allow arbitrary nesting of pipelines.
 
 ## Running the extension
 
@@ -100,9 +150,17 @@ install psql from community;
 
 and subsequently loaded with
 
-```
+```sql
 load psql;
 ```
+
+The pipe syntax is a grammar extension, which DuckDB activates per connection with the `active_grammar_extensions` setting. Loading PSQL activates it on every connection:
+
+- the connection that runs `load psql` can use pipes from its next statement on (not in later statements of the same query string, which are already parsed),
+- connections opened afterwards have it activated right away,
+- connections that were already open activate it at the end of their current or next query. They may be running a query on another thread while PSQL is loaded, so their settings cannot be changed right away.
+
+A connection can opt out with `reset active_grammar_extensions;` (or by setting the list of active grammar extensions without `psql`), and opt in again with `call psql_enable();`, which adds PSQL while keeping other active grammar extensions.
 
 ## Build from source
 To build the extension:
@@ -120,3 +178,8 @@ The main binaries that will be built are:
 - `psql.duckdb_extension` is the loadable binary as it would be distributed.
 
 To run the extension code, simply start the shell with `./build/release/duckdb`.
+
+To run the tests:
+```sh
+make test
+```

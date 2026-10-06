@@ -3,20 +3,53 @@
 # group: [sql]
 
 statement ok
+PRAGMA enable_verification
+
+statement ok
 CREATE TABLE t1(i INTEGER, j INTEGER);
+
+statement ok
+INSERT INTO t1 VALUES (1, 10), (2, 20), (3, 30);
 
 # Before we load the extension, this will fail
 statement error
 from t1 |> order by i
 ----
-Parser Error: syntax error at or near "|>"
+syntax error at or near "|>"
 
 # Require statement will ensure this test is run with this extension loaded
 require psql
 
-# Confirm the extension works
+# psql_enable.test covers when connections enable psql on their own after it is loaded
 statement ok
-from t1 |> order by i
+CALL psql_enable();
+
+query T
+SELECT name FROM duckdb_grammar_extensions() WHERE name = 'psql';
+----
+psql
+
+query T
+SELECT current_setting('active_grammar_extensions');
+----
+[psql]
+
+# enabling again is a no-op
+statement ok
+CALL psql_enable();
+
+query T
+SELECT current_setting('active_grammar_extensions');
+----
+[psql]
+
+# Confirm the extension works
+query II
+from t1 |> order by i desc
+----
+3	30
+2	20
+1	10
 
 # Trailing semicolon should work (e.g. used as part of CLI)
 statement ok
@@ -26,30 +59,241 @@ from t1 |> order by i;
 statement error
 from t1 |> srt j
 ----
-Parser Error: syntax error at or near "j"
+syntax error at or near "j"
 
-# Only split on | that has whitespace around it
-statement ok
-from t1 |> select i || ',' || j;
+# a pipe stage cannot be empty
+statement error
+from t1 |>
+----
+empty pipe stage
 
-# as statement to provide named access
-statement ok
-from t1 |> select i || ',' || j as bar |> as foo select foo.bar;
+statement error
+from t1 |> |> select i
+----
+empty pipe stage
 
-# scoped transforms
-statement ok
-create table t2 as (| from t1 |> select i || ',' || j as bar |> as foo select foo.bar |);
+# || is string concatenation, not a pipe
+query T
+from t1 |> select i || ',' || j |> order by all;
+----
+1,10
+2,20
+3,30
 
-# multiple scoped transforms
-statement ok
-with x as (| from t1 |> select i || ',' || j as bar |> as foo |), y as (| from t1 |> select i || ',' || j as bar |> as foo |) from x union from y;
+# as statement to provide named access
+query T
+from t1 |> select i || ',' || j as bar |> as foo select foo.bar order by all;
+----
+1,10
+2,20
+3,30
+
+# column aliases on the stage input
+query II
+from t1 |> as foo(a, b) select b, a |> order by a limit 1;
+----
+10	1
+
+# no whitespace needed around |>
+query I
+from t1|>select i|>where i>2;
+----
+3
+
+# a stage is anything that can follow FROM (input)
+query II
+from t1 |> where i > 1 |> select i % 2 as parity, sum(j) as total group by parity |> order by parity;
+----
+0	20
+1	30
+
+query II
+from t1 |> select i % 2 as parity, sum(j) as total group by parity having sum(j) > 20 |> select *;
+----
+1	40
+
+query I
+from t1 |> select i, row_number() over w as rn window w as (order by i desc) |> where rn = 1 |> select i;
+----
+3
+
+query I
+from t1 |> select i qualify row_number() over (order by j desc) = 2;
+----
+2
+
+query I
+from t1 |> select distinct i % 2 as parity |> order by parity;
+----
+0
+1
+
+# the source can have its own ORDER BY / LIMIT
+query I
+from t1 order by i desc limit 2 |> select i |> order by i;
+----
+2
+3
+
+# joins in a stage
+query III
+from t1 |> as a join t1 b on a.i = b.i + 1 select a.i, b.i, a.j + b.j order by all;
+----
+2	1	30
+3	2	50
+
+query II
+from t1 |> join (values (1, 'one'), (3, 'three')) v(i, name) using (i) |> select i, name order by i;
+----
+1	one
+3	three
+
+query I
+from t1 |> as a, t1 b |> select count(*);
+----
+9
+
+# set operations in the source apply before the pipe
+query I
+from t1 select i union all select 42 |> select max(i);
+----
+42
+
+# set operations in a stage apply to that stage
+query I
+from t1 |> select i |> where i < 3 union all select 42 |> order by all;
+----
+1
+2
+42
+
+query I
+from t1 |> select i |> union all select 42 |> except select 2 |> order by all;
+----
+1
+3
+42
+
+# pipelines work wherever a query can appear, no special delimiters needed
+query II
+select (from t1 |> select max(i)), (from t1 |> where i < 3 |> select count(*));
+----
+3	2
+
+query I
+from (from t1 |> where i > 1) |> select sum(i);
+----
+5
+
+query I
+from t1 |> join (from t1 |> select i + 1 as k) on i = k |> select sum(i);
+----
+5
+
+query I
+select count(*) from t1 where i in (from t1 |> where j >= 20 |> select i);
+----
+2
+
+# a WITH clause in front of a pipeline is visible in all stages
+query I
+with x as (from t1 |> where i >= 2) from x |> join x as y using (i) |> select count(*);
+----
+2
 
 statement ok
-INSTALL httpfs;
+create view v as from t1 |> where i > 1 |> select i * 2 as d;
+
+query I
+from v order by d;
+----
+4
+6
 
 statement ok
-LOAD httpfs;
+create table t2 as from t1 |> select i || ',' || j as bar;
+
+statement ok
+insert into t2 from t1 |> where i = 1 |> select 'x' || i;
+
+query T
+from t2 order by all;
+----
+1,10
+2,20
+3,30
+x1
+
+statement ok
+create macro above(n) as table from t1 |> where i > n |> select i;
+
+query I
+from above(1) order by i;
+----
+2
+3
+
+statement ok
+explain from t1 |> select i;
+
+# parameters are numbered in query order
+statement ok
+prepare p as from t1 |> where i > ? |> select i * ? as r order by r;
+
+query I
+execute p(1, 10);
+----
+20
+30
+
+# scoped transforms with (| ... |), the syntax of earlier PSQL versions
+statement ok
+create table t3 as (| from t1 |> select i || ',' || j as bar |> as foo select foo.bar |);
+
+query T
+from t3 order by all;
+----
+1,10
+2,20
+3,30
+
+# multiple scoped transforms
+query T
+with x as (| from t1 |> select i || ',' || j as bar |> as foo |), y as (| from t1 |> select i || ',' || j as bar |> as foo |) from x union from y order by all;
+----
+1,10
+2,20
+3,30
 
 # full README example
+query III
+from 'example/invoices.csv' |> where invoice_date >= date '1970-01-16' |> select *, 0.8 as transaction_fees, total - transaction_fees as income |> where income > 1 |> select customer_id, avg(total), sum(income) as sum_income, count() as ct group by customer_id |> order by sum_income desc |> limit 10 |> as invoices join 'example/customers.csv' as customers on invoices.customer_id = customers.customer_id |> select customer_id, last_name || ', ' || first_name as name, sum_income |> order by customer_id;
+----
+6	Holý, Helena	43.83
+7	Gruber, Astrid	36.83
+24	Ralston, Frank	37.83
+25	Stevens, Victor	36.83
+26	Cunningham, Richard	41.83
+28	Barnett, Julia	37.83
+37	Zimmermann, Fynn	37.83
+45	Kovács, Ladislav	39.83
+46	O'Reilly, Hugh	39.83
+57	Rojas, Luis	40.83
+
+# deactivating the grammar extension disables pipes again
 statement ok
-from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |> where invoice_date >= date '1970-01-16' |> select *, 0.8 as transaction_fees, total - transaction_fees as income |> where income > 1 |> select customer_id, avg(total), sum(income) as sum_income, count() as ct group by customer_id |> order by sum_income desc |> limit 10 |> as invoices join 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/customers.csv' as customers on invoices.customer_id = customers.customer_id |> select customer_id, last_name || ', ' || first_name as name, sum_income, version() as db_version;
+RESET active_grammar_extensions;
+
+statement error
+from t1 |> order by i
+----
+syntax error at or near "|>"
+
+# the setting can also be used directly
+statement ok
+SET active_grammar_extensions = ['psql'];
+
+query I
+from t1 |> select count(*);
+----
+3
