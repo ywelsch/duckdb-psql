@@ -49,6 +49,8 @@ which returns:
   10 rows                              3 columns
 ```
 
+Every stage continues a `FROM`-first query on the result of the previous stage: `A |> B` is `FROM (A) B`. A stage can therefore contain anything that can follow the first table of a `FROM`-first query, such as joins, `SELECT`, `WHERE`, `GROUP BY` or `ORDER BY`, as well as an alias for that table, which needs `AS`, as in `|> as invoices` above.
+
 Pipelines can be used anywhere a query can appear: in subqueries, CTEs, views, `CREATE TABLE ... AS`, `INSERT INTO ...`, and so on:
 
 ```sql
@@ -80,29 +82,6 @@ to 'names.csv' (header false, delimiter '|');
 ```
 
 This is equivalent to `COPY (pipeline) TO 'file' (options)`, so `|> to` has to be the last stage of a top-level query.
-
-## How does it work?
-
-PSQL extends the grammar of DuckDB's PEG parser, so that every query can be followed by pipe stages. A pipe stage is anything that can follow the first table of a `FROM`-first query: a table alias (which needs `AS` in a stage), joins, `SELECT`, `WHERE`, `GROUP BY`, `HAVING`, `WINDOW`, `QUALIFY`, set operations, `ORDER BY`, `LIMIT`, ... It is parsed as if the pipe input was written in that position, so
-
-```sql
-A |> B |> C |> D
-```
-is equivalent to
-```sql
-FROM (
-FROM (
-FROM (
-  A
-)
-  B
-)
-  C
-)
-  D
-```
-
-A `WITH` clause in front of a pipeline is visible in all of its stages. Table aliases that a stage introduces, for example with `JOIN ... AS t`, are only visible within that stage, as the next stage reads the result of the previous one as a subquery. To refer to the result of a stage by name, give it an alias with a stage of its own: `|> as t` names the input of the following stages.
 
 ## BigQuery pipe syntax
 
