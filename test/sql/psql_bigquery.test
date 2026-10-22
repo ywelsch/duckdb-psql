@@ -94,6 +94,37 @@ select 1 as a, 2 as b |> as t |> where t.a = 1 |> extend t.a + t.b as c |> selec
 ----
 3
 
+# the alias of the stage input needs AS, so the keyword of an operator is not one
+statement error
+from produce |> p |> select count(p.item);
+----
+syntax error at or near "p"
+
+foreach keyword extend set drop rename copy
+
+statement error
+from produce |> ${keyword};
+----
+syntax error at or near ";"
+
+query I
+from produce |> as ${keyword} |> select count(${keyword}.item);
+----
+4
+
+endloop
+
+# keywords and quoted names as columns of SET, DROP and RENAME
+query II
+select 1 as "time", 2 as "two words" |> set time = time + 1 |> rename "two words" as two;
+----
+2	2
+
+query I
+select 1 as "time", 2 as b |> drop time;
+----
+2
+
 # set operations
 query I
 select 1 as n |> union all (select 1) |> order by all;
@@ -158,9 +189,9 @@ select 2 as x, 3 |> set x = 4;
 ----
 4	3
 
-# the operator keywords are not reserved
+# the operator keywords are not reserved, but need AS to be a stage alias
 query I
-select 1 as a |> extend select extend.a;
+select 1 as a |> as extend select extend.a;
 ----
 1
 

@@ -59,7 +59,7 @@ from t1 |> order by i;
 statement error
 from t1 |> srt j
 ----
-syntax error at or near "j"
+syntax error at or near "srt"
 
 # a pipe stage cannot be empty
 statement error

@@ -67,9 +67,9 @@ from '{TEST_DIR}/psql_prepared.csv';
 ----
 3	30
 
-# COPY without TO is still a table alias
+# COPY without TO is a table alias with AS
 query I
-from t1 |> copy select copy.i order by all;
+from t1 |> as copy select copy.i order by all;
 ----
 1
 2

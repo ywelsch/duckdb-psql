@@ -46,7 +46,7 @@ namespace duckdb {
 //                              QualifyClause? PsqlStageSample?
 //   PsqlStageSample         <- SelectSampleClause / SampleClause
 //   PsqlStageFromSelect     <- PsqlStageFrom SelectClause?
-//   PsqlStageFrom           <- TableAlias? JoinOrPivot* (',' TableRef)*
+//   PsqlStageFrom           <- TableAliasAs? JoinOrPivot* (',' TableRef)*
 //
 // PsqlPipelineSource is the original definition of SelectStatementInternal, and
 // the PsqlStage* rules mirror the shape of the core rules SelectSetOpChain,
@@ -337,7 +337,7 @@ static const TransformFrameOps PSQL_STAGE_FROM_SELECT_OPS = {
     "PsqlStageFromSelect", InitializeStageFromSelect,
     &PEGTransformerFactory::FinalizeFromSelectClauseTrampoline};
 
-// PsqlStageFrom <- TableAlias? JoinOrPivot* (',' TableRef)*
+// PsqlStageFrom <- TableAliasAs? JoinOrPivot* (',' TableRef)*
 // Child slots: the alias, then the joins, then the tables
 static void InitializeStageFrom(PEGTransformer &,
                                 GeneratedTransformProcess &process) {
@@ -429,7 +429,7 @@ static const TransformFrameOps PSQL_EXTEND_OPS = {
 
 // |> SET column = expression [, ...] is SELECT * REPLACE (expression AS column)
 // PsqlSet <- 'SET' List(PsqlSetItem)
-// PsqlSetItem <- ColId '=' Expression
+// PsqlSetItem <- PsqlColumnName '=' Expression
 static void InitializeSet(PEGTransformer &,
                           GeneratedTransformProcess &process) {
   auto &list = process.parse_result.Cast<ListParseResult>();
@@ -461,7 +461,7 @@ static const TransformFrameOps PSQL_SET_OPS = {"PsqlSet", InitializeSet,
                                                FinalizeSet};
 
 // |> DROP column [, ...] is SELECT * EXCLUDE (column [, ...])
-// PsqlDrop <- 'DROP' List(ColId)
+// PsqlDrop <- 'DROP' List(PsqlColumnName)
 static void InitializeDrop(PEGTransformer &,
                            GeneratedTransformProcess &process) {
   auto &list = process.parse_result.Cast<ListParseResult>();
@@ -488,7 +488,7 @@ static const TransformFrameOps PSQL_DROP_OPS = {"PsqlDrop", InitializeDrop,
 
 // |> RENAME old [AS] new [, ...] is SELECT * RENAME (old AS new [, ...])
 // PsqlRename <- 'RENAME' List(PsqlRenameItem)
-// PsqlRenameItem <- ColId 'AS'? ColId
+// PsqlRenameItem <- PsqlColumnName 'AS'? ColId
 static void InitializeRename(PEGTransformer &,
                              GeneratedTransformProcess &process) {
   auto &list = process.parse_result.Cast<ListParseResult>();
@@ -769,17 +769,23 @@ public:
         StartChoiceTransform);
     add("PsqlStageFromSelect <- PsqlStageFrom SelectClause?",
         TransformWith(PSQL_STAGE_FROM_SELECT_OPS));
-    add("PsqlStageFrom <- TableAlias? JoinOrPivot* (',' TableRef)*",
+    // unlike in a FROM clause, the alias of the stage input needs AS, as the
+    // keywords of the pipe operators would otherwise be aliases
+    add("PsqlStageFrom <- TableAliasAs? JoinOrPivot* (',' TableRef)*",
         TransformWith(PSQL_STAGE_FROM_OPS));
 
     add("PsqlExtend <- 'EXTEND' TargetList WindowClause?",
         TransformWith(PSQL_EXTEND_OPS));
     add("PsqlSet <- 'SET' List(PsqlSetItem)", TransformWith(PSQL_SET_OPS));
-    add("PsqlSetItem <- ColId '=' Expression");
-    add("PsqlDrop <- 'DROP' List(ColId)", TransformWith(PSQL_DROP_OPS));
+    add("PsqlSetItem <- PsqlColumnName '=' Expression");
+    add("PsqlDrop <- 'DROP' List(PsqlColumnName)",
+        TransformWith(PSQL_DROP_OPS));
     add("PsqlRename <- 'RENAME' List(PsqlRenameItem)",
         TransformWith(PSQL_RENAME_OPS));
-    add("PsqlRenameItem <- ColId 'AS'? ColId");
+    add("PsqlRenameItem <- PsqlColumnName 'AS'? ColId");
+    // ColumnName lets autocomplete suggest column names, ColId also accepts
+    // the keywords that are valid column names
+    add("PsqlColumnName <- ColumnName / ColId", TransformLike("ColId"));
     add("PsqlDistinct <- 'DISTINCT'", TransformWith(PSQL_DISTINCT_OPS));
 
     add("PsqlOperatorLiteral <- Identifier", TransformLike("OperatorLiteral"));
