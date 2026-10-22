@@ -139,7 +139,26 @@ which returns:
 └────────────┴─────────────┴──────────────┴───────────┴─────────┴────────┴────────┘
 ```
 
-Operators that DuckDB's SQL covers with a native form are not supported: instead of `AGGREGATE`, use `select ... group by all` (and `order by all`), instead of a `WITH` stage, put the `WITH` clause in front of the pipeline, instead of set operations with several comma-separated queries, chain the set operations, and instead of `CALL f(...)`, call the table function on a subquery: `from f((from ... |> ...))`.
+### BigQuery operators that DuckDB's SQL doesn't need
+
+Some BigQuery operators save typing that DuckDB's SQL already saves in other ways. PSQL leaves them out rather than offer two ways to write the same stage:
+
+| BigQuery | PSQL |
+|----------|------|
+| `\|> aggregate sum(sales) as total group by item` | `\|> select item, sum(sales) as total group by all` |
+| `\|> aggregate sum(sales) as total group and order by item` | `\|> select item, sum(sales) as total group by all order by all` |
+| `\|> aggregate sum(sales) as total desc group by item` | `\|> select item, sum(sales) as total group by all order by total desc` |
+| `\|> aggregate count(*)` | `\|> select count(*)` |
+| `\|> with t as (...) \|> ...` | `with t as (...) from ... \|> ...` |
+| `\|> union all (q1), (q2)` | `\|> union all (q1) \|> union all (q2)` |
+| `\|> call f(...)` | `from f((from ... \|> ...))` |
+
+- `AGGREGATE` lists the grouping columns once, where a `SELECT` with `GROUP BY` names them both in the select list and in the `GROUP BY`. DuckDB's `group by all` groups by the columns of the select list that are not aggregates, so they are written once there too. `group and order by` also sorts by the grouping columns: `order by all` sorts by all columns from left to right, and as the grouping columns come first and every combination of them occurs once, that is the same order.
+- A `WITH` stage defines common table expressions for the following stages. A `WITH` clause in front of a pipeline is visible in all of its stages already.
+- Set operations with several comma-separated queries save repeating the operator, while chaining the set operations takes one more `|>` per query.
+- `CALL` passes the pipeline to a table function with a table parameter. DuckDB's table functions take the pipeline as a subquery argument instead, as in `from summary((from ... |> ...))`. DuckDB's table macros cannot take a table argument though, so there are few such functions to call.
+
+`MATCH_RECOGNIZE` is not supported either, as DuckDB's SQL has no counterpart for it.
 
 ## Limitations
 
