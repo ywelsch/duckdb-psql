@@ -129,6 +129,17 @@ from produce |> tablesample system (100 percent) |> select count(*);
 ----
 4
 
+# USING SAMPLE, on its own or after the other clauses of a stage
+query I
+from produce |> using sample 100 percent (system) |> select count(*);
+----
+4
+
+query I
+from produce |> where sales > 4 using sample 100 percent (system) |> select count(*);
+----
+3
+
 # PIVOT and UNPIVOT
 query II
 from produce |> select item, sales |> pivot (sum(sales) as total for item in ('apples', 'bananas'));

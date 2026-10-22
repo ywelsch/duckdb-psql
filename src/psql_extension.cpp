@@ -43,7 +43,8 @@ namespace duckdb {
 //   PsqlStageIntersectChain <- PsqlStageSelect IntersectChainTail*
 //   PsqlStageSelect         <- PsqlStageFromSelect WhereClause?
 //                              GroupByClause? HavingClause? WindowClause?
-//                              QualifyClause? SampleClause?
+//                              QualifyClause? PsqlStageSample?
+//   PsqlStageSample         <- SelectSampleClause / SampleClause
 //   PsqlStageFromSelect     <- PsqlStageFrom SelectClause?
 //   PsqlStageFrom           <- TableAlias? JoinOrPivot* (',' TableRef)*
 //
@@ -71,7 +72,12 @@ static vector<reference<ParseResult>> GetRepeatChildren(ListParseResult &list,
   if (!optional.HasResult()) {
     return {};
   }
-  return optional.GetResult().Cast<RepeatParseResult>().GetChildren();
+  vector<reference<ParseResult>> result;
+  for (auto &child :
+       optional.GetResult().Cast<RepeatParseResult>().GetChildren()) {
+    result.push_back(child);
+  }
+  return result;
 }
 
 //! The elements of a List(D) in the grammar
@@ -96,7 +102,7 @@ static optional_ptr<ParseResult> GetOptional(ListParseResult &list,
 }
 
 static bool IsRule(const ParseResult &parse_result, const char *rule_name) {
-  return StringUtil::CIEquals(parse_result.name, rule_name);
+  return StringUtil::CIEquals(parse_result.Name(), rule_name);
 }
 
 template <class T> static T TakeResult(TransformResultValue &value) {
@@ -107,17 +113,18 @@ template <class T> static T TakeResult(TransformResultValue &value) {
   return std::move(*result);
 }
 
-static unique_ptr<TransformResultValue>
-SelectResult(unique_ptr<SelectStatement> statement) {
-  return make_uniq<TypedTransformResult<unique_ptr<SelectStatement>>>(
+static arena_ptr<TransformResultValue>
+SelectResult(PEGTransformer &transformer,
+             unique_ptr<SelectStatement> statement) {
+  return transformer.MakeResult<unique_ptr<SelectStatement>>(
       std::move(statement));
 }
 
-static unique_ptr<TransformResultValue>
-SelectResult(unique_ptr<QueryNode> node) {
+static arena_ptr<TransformResultValue>
+SelectResult(PEGTransformer &transformer, unique_ptr<QueryNode> node) {
   auto statement = make_uniq<SelectStatement>();
   statement->node = std::move(node);
-  return SelectResult(std::move(statement));
+  return SelectResult(transformer, std::move(statement));
 }
 
 //===--------------------------------------------------------------------===//
@@ -207,7 +214,7 @@ class PsqlForwardProcess final : public TransformProcess {
 public:
   explicit PsqlForwardProcess(ParseResult &child_p) : child(child_p) {}
 
-  TransformStep Resume(unique_ptr<TransformResultValue> child_result) override {
+  TransformStep Resume(arena_ptr<TransformResultValue> child_result) override {
     if (child_result) {
       return TransformStep::Complete(std::move(child_result));
     }
@@ -218,22 +225,24 @@ private:
   ParseResult &child;
 };
 
-static unique_ptr<TransformProcess>
-StartChoiceTransform(PEGTransformer &, ParseResult &parse_result) {
-  return make_uniq<PsqlForwardProcess>(GetChoice(parse_result));
+static arena_ptr<TransformProcess>
+StartChoiceTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+  return transformer.MakeProcess<PsqlForwardProcess>(GetChoice(parse_result));
 }
 
 static grammar_transform_process_function_t TransformChild(idx_t child_idx) {
-  return [child_idx](PEGTransformer &, ParseResult &parse_result) {
+  return [child_idx](PEGTransformer &transformer, ParseResult &parse_result) {
     auto &list = parse_result.Cast<ListParseResult>();
-    return make_uniq<PsqlForwardProcess>(list.GetChild(child_idx));
+    return transformer.MakeProcess<PsqlForwardProcess>(
+        list.GetChild(child_idx));
   };
 }
 
 static grammar_transform_process_function_t
 TransformWith(const TransformFrameOps &ops) {
   return [&ops](PEGTransformer &transformer, ParseResult &parse_result) {
-    return make_uniq<GeneratedTransformProcess>(transformer, parse_result, ops);
+    return transformer.MakeProcess<GeneratedTransformProcess>(
+        transformer, parse_result, ops);
   };
 }
 
@@ -276,8 +285,9 @@ static void InitializeStageQuery(PEGTransformer &,
   PushChildren(process, {list.GetChild(0), GetOptional(list, 1)});
 }
 
-static unique_ptr<TransformResultValue>
-FinalizeStageQuery(PEGTransformer &, GeneratedTransformProcess &process) {
+static arena_ptr<TransformResultValue>
+FinalizeStageQuery(PEGTransformer &transformer,
+                   GeneratedTransformProcess &process) {
   auto statement = process.TakeResult<unique_ptr<SelectStatement>>(0);
   if (process.child_results[1]) {
     auto result_modifiers =
@@ -286,7 +296,7 @@ FinalizeStageQuery(PEGTransformer &, GeneratedTransformProcess &process) {
       statement->node->modifiers.push_back(std::move(result_modifier));
     }
   }
-  return SelectResult(std::move(statement));
+  return SelectResult(transformer, std::move(statement));
 }
 
 static const TransformFrameOps PSQL_STAGE_QUERY_OPS = {
@@ -342,8 +352,9 @@ static void InitializeStageFrom(PEGTransformer &,
   PushChildren(process, children);
 }
 
-static unique_ptr<TransformResultValue>
-FinalizeStageFrom(PEGTransformer &, GeneratedTransformProcess &process) {
+static arena_ptr<TransformResultValue>
+FinalizeStageFrom(PEGTransformer &transformer,
+                  GeneratedTransformProcess &process) {
   auto &list = process.parse_result.Cast<ListParseResult>();
   auto join_count = GetRepeatChildren(list, 1).size();
   auto table_count = GetRepeatChildren(list, 2).size();
@@ -375,8 +386,7 @@ FinalizeStageFrom(PEGTransformer &, GeneratedTransformProcess &process) {
     cross_product->is_implicit = true;
     result = std::move(cross_product);
   }
-  return make_uniq<TypedTransformResult<unique_ptr<TableRef>>>(
-      std::move(result));
+  return transformer.MakeResult<unique_ptr<TableRef>>(std::move(result));
 }
 
 static const TransformFrameOps PSQL_STAGE_FROM_OPS = {
@@ -397,7 +407,7 @@ static void InitializeExtend(PEGTransformer &transformer,
   PushChildren(process, {GetOptional(list, 2), list.GetChild(1)});
 }
 
-static unique_ptr<TransformResultValue>
+static arena_ptr<TransformResultValue>
 FinalizeExtend(PEGTransformer &transformer,
                GeneratedTransformProcess &process) {
   if (process.child_results[0]) {
@@ -411,7 +421,7 @@ FinalizeExtend(PEGTransformer &transformer,
   for (auto &expression : expressions) {
     node->select_list.push_back(std::move(expression));
   }
-  return SelectResult(std::move(node));
+  return SelectResult(transformer, std::move(node));
 }
 
 static const TransformFrameOps PSQL_EXTEND_OPS = {
@@ -432,8 +442,8 @@ static void InitializeSet(PEGTransformer &,
   PushChildren(process, children);
 }
 
-static unique_ptr<TransformResultValue>
-FinalizeSet(PEGTransformer &, GeneratedTransformProcess &process) {
+static arena_ptr<TransformResultValue>
+FinalizeSet(PEGTransformer &transformer, GeneratedTransformProcess &process) {
   auto node = CreateStageSelect();
   auto &star = node->select_list[0]->Cast<StarExpression>();
   for (idx_t slot = 0; slot < process.child_results.size(); slot += 2) {
@@ -444,7 +454,7 @@ FinalizeSet(PEGTransformer &, GeneratedTransformProcess &process) {
     star.ReplaceListMutable()[column] =
         process.TakeResult<unique_ptr<ParsedExpression>>(slot + 1);
   }
-  return SelectResult(std::move(node));
+  return SelectResult(transformer, std::move(node));
 }
 
 static const TransformFrameOps PSQL_SET_OPS = {"PsqlSet", InitializeSet,
@@ -462,15 +472,15 @@ static void InitializeDrop(PEGTransformer &,
   PushChildren(process, children);
 }
 
-static unique_ptr<TransformResultValue>
-FinalizeDrop(PEGTransformer &, GeneratedTransformProcess &process) {
+static arena_ptr<TransformResultValue>
+FinalizeDrop(PEGTransformer &transformer, GeneratedTransformProcess &process) {
   auto node = CreateStageSelect();
   auto &star = node->select_list[0]->Cast<StarExpression>();
   for (idx_t slot = 0; slot < process.child_results.size(); slot++) {
     star.ExcludeListMutable().insert(
         QualifiedColumnName(process.TakeResult<Identifier>(slot)));
   }
-  return SelectResult(std::move(node));
+  return SelectResult(transformer, std::move(node));
 }
 
 static const TransformFrameOps PSQL_DROP_OPS = {"PsqlDrop", InitializeDrop,
@@ -491,8 +501,9 @@ static void InitializeRename(PEGTransformer &,
   PushChildren(process, children);
 }
 
-static unique_ptr<TransformResultValue>
-FinalizeRename(PEGTransformer &, GeneratedTransformProcess &process) {
+static arena_ptr<TransformResultValue>
+FinalizeRename(PEGTransformer &transformer,
+               GeneratedTransformProcess &process) {
   auto node = CreateStageSelect();
   auto &star = node->select_list[0]->Cast<StarExpression>();
   for (idx_t slot = 0; slot < process.child_results.size(); slot += 2) {
@@ -503,7 +514,7 @@ FinalizeRename(PEGTransformer &, GeneratedTransformProcess &process) {
     }
     star.RenameListMutable()[column] = process.TakeResult<Identifier>(slot + 1);
   }
-  return SelectResult(std::move(node));
+  return SelectResult(transformer, std::move(node));
 }
 
 static const TransformFrameOps PSQL_RENAME_OPS = {
@@ -512,11 +523,11 @@ static const TransformFrameOps PSQL_RENAME_OPS = {
 // |> DISTINCT is SELECT DISTINCT * FROM <input>
 static void InitializeDistinct(PEGTransformer &, GeneratedTransformProcess &) {}
 
-static unique_ptr<TransformResultValue>
-FinalizeDistinct(PEGTransformer &, GeneratedTransformProcess &) {
+static arena_ptr<TransformResultValue>
+FinalizeDistinct(PEGTransformer &transformer, GeneratedTransformProcess &) {
   auto node = CreateStageSelect();
   node->modifiers.push_back(make_uniq<DistinctModifier>());
-  return SelectResult(std::move(node));
+  return SelectResult(transformer, std::move(node));
 }
 
 static const TransformFrameOps PSQL_DISTINCT_OPS = {
@@ -569,7 +580,7 @@ public:
     }
   }
 
-  TransformStep Resume(unique_ptr<TransformResultValue> child_result) override {
+  TransformStep Resume(arena_ptr<TransformResultValue> child_result) override {
     if (child_result) {
       switch (children[next_child - 1].type) {
       case ChildType::QUERY:
@@ -589,7 +600,8 @@ public:
     // a WITH clause in front of the pipeline is visible in all of its stages
     result->node->cte_map = std::move(cte_map);
     if (!top_level) {
-      return TransformStep::Complete(SelectResult(std::move(result)));
+      return TransformStep::Complete(
+          SelectResult(transformer, std::move(result)));
     }
     unique_ptr<SQLStatement> statement;
     if (is_copy) {
@@ -599,8 +611,7 @@ public:
       statement = std::move(result);
     }
     return TransformStep::Complete(
-        make_uniq<TypedTransformResult<unique_ptr<SQLStatement>>>(
-            std::move(statement)));
+        transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(statement)));
   }
 
 private:
@@ -653,13 +664,14 @@ private:
   optional<vector<GenericCopyOption>> copy_options;
 };
 
-static unique_ptr<TransformProcess>
+static arena_ptr<TransformProcess>
 StartPipelineTransform(PEGTransformer &transformer, ParseResult &parse_result) {
-  return make_uniq<PsqlPipelineProcess>(transformer, parse_result, false);
+  return transformer.MakeProcess<PsqlPipelineProcess>(transformer, parse_result,
+                                                      false);
 }
 
 // SelectStatement <- SelectStatementInternal
-static unique_ptr<TransformProcess>
+static arena_ptr<TransformProcess>
 StartStatementTransform(PEGTransformer &transformer,
                         ParseResult &parse_result) {
   auto &select = parse_result.Cast<ListParseResult>().GetChild(0);
@@ -667,7 +679,8 @@ StartStatementTransform(PEGTransformer &transformer,
   if (IsRule(*pipeline, "PsqlDelimitedPipeline")) {
     pipeline = &pipeline->Cast<ListParseResult>().GetChild(1);
   }
-  return make_uniq<PsqlPipelineProcess>(transformer, *pipeline, true);
+  return transformer.MakeProcess<PsqlPipelineProcess>(transformer, *pipeline,
+                                                      true);
 }
 
 //===--------------------------------------------------------------------===//
@@ -695,6 +708,11 @@ public:
   }
 
   string ToString() const override { return "OPERATOR"; }
+
+  void InitializeFirstSet(MatcherFirstSet &first_set,
+                          const GrammarLiteralTable &table) const override {
+    operator_matcher.InitializeFirstSet(first_set, table);
+  }
 
 private:
   OperatorMatcher operator_matcher;
@@ -744,8 +762,11 @@ public:
     add("PsqlStageIntersectChain <- PsqlStageSelect IntersectChainTail*",
         TransformWith(PSQL_STAGE_INTERSECT_CHAIN_OPS));
     add("PsqlStageSelect <- PsqlStageFromSelect WhereClause? GroupByClause? "
-        "HavingClause? WindowClause? QualifyClause? SampleClause?",
+        "HavingClause? WindowClause? QualifyClause? PsqlStageSample?",
         TransformLike("SimpleSelect"));
+    // a stage samples its input with USING SAMPLE as well as TABLESAMPLE
+    add("PsqlStageSample <- SelectSampleClause / SampleClause",
+        StartChoiceTransform);
     add("PsqlStageFromSelect <- PsqlStageFrom SelectClause?",
         TransformWith(PSQL_STAGE_FROM_SELECT_OPS));
     add("PsqlStageFrom <- TableAlias? JoinOrPivot* (',' TableRef)*",

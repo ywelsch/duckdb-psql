@@ -7,17 +7,14 @@ Pipes allow you to compose your SQL queries in a very natural way (example inspi
 ```sql
 from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
 where invoice_date >= date '1970-01-16' |>
-select
-  *, 
+extend
   0.8 as transaction_fees,
   total - transaction_fees as income |>
 where income > 1 |>
 select
-  customer_id, 
-  avg(total), 
-  sum(income) as sum_income, 
-  count() as ct
-  group by customer_id |>
+  customer_id,
+  sum(income) as sum_income
+  group by all |>
 order by sum_income desc |>
 limit 10 |>
 as invoices
@@ -27,30 +24,29 @@ as invoices
 select
   customer_id,
   last_name || ', ' || first_name as name,
-  sum_income,
-  version() as db_version;
+  sum_income |>
+order by sum_income desc, name;
 ```
 
 which returns:
 
 ```
-┌─────────────┬─────────────────────┬────────────┬────────────┐
-│ customer_id │        name         │ sum_income │ db_version │
-│    int64    │       varchar       │   double   │  varchar   │
-├─────────────┼─────────────────────┼────────────┼────────────┤
-│           6 │ Holý, Helena        │      43.83 │ v0.7.1     │
-│           7 │ Gruber, Astrid      │      36.83 │ v0.7.1     │
-│          24 │ Ralston, Frank      │      37.83 │ v0.7.1     │
-│          25 │ Stevens, Victor     │      36.83 │ v0.7.1     │
-│          26 │ Cunningham, Richard │      41.83 │ v0.7.1     │
-│          28 │ Barnett, Julia      │      37.83 │ v0.7.1     │
-│          37 │ Zimmermann, Fynn    │      37.83 │ v0.7.1     │
-│          45 │ Kovács, Ladislav    │      39.83 │ v0.7.1     │
-│          46 │ O'Reilly, Hugh      │      39.83 │ v0.7.1     │
-│          57 │ Rojas, Luis         │      40.83 │ v0.7.1     │
-├─────────────┴─────────────────────┴────────────┴────────────┤
-│ 10 rows                                           4 columns │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────┬─────────────────────┬────────────┐
+│ customer_id │        name         │ sum_income │
+│    int64    │       varchar       │   double   │
+├─────────────┼─────────────────────┼────────────┤
+│           6 │ Holý, Helena        │      43.83 │
+│          26 │ Cunningham, Richard │      41.83 │
+│          57 │ Rojas, Luis         │      40.83 │
+│          45 │ Kovács, Ladislav    │      39.83 │
+│          46 │ O'Reilly, Hugh      │      39.83 │
+│          28 │ Barnett, Julia      │      37.83 │
+│          24 │ Ralston, Frank      │      37.83 │
+│          37 │ Zimmermann, Fynn    │      37.83 │
+│           7 │ Gruber, Astrid      │      36.83 │
+│          25 │ Stevens, Victor     │      36.83 │
+└─────────────┴─────────────────────┴────────────┘
+  10 rows                              3 columns
 ```
 
 Pipelines can be used anywhere a query can appear: in subqueries, CTEs, views, `CREATE TABLE ... AS`, `INSERT INTO ...`, and so on:
@@ -59,8 +55,7 @@ Pipelines can be used anywhere a query can appear: in subqueries, CTEs, views, `
 create view invoices as
   from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
   where invoice_date >= date '1970-01-16' |>
-  select
-    *,
+  extend
     0.8 as transaction_fees,
     total - transaction_fees as income;
 
@@ -124,12 +119,24 @@ Most operators of [BigQuery's pipe syntax](https://docs.cloud.google.com/bigquer
 
 ```sql
 from 'https://raw.githubusercontent.com/ywelsch/duckdb-psql/main/example/invoices.csv' |>
-extend total * 0.8 as income |>
-drop billing_address, billing_postal_code |>
-rename billing_city as city |>
-select city, sum(income) as income group by all |>
-order by income desc |>
+drop billing_address, billing_state, billing_postal_code |>
+rename billing_city as city, billing_country as country |>
+set invoice_date = invoice_date::date |>
+extend round(total * 0.8, 2) as income |>
 limit 3;
+```
+
+which returns:
+
+```
+┌────────────┬─────────────┬──────────────┬───────────┬─────────┬────────┬────────┐
+│ invoice_id │ customer_id │ invoice_date │   city    │ country │ total  │ income │
+│   int64    │    int64    │     date     │  varchar  │ varchar │ double │ double │
+├────────────┼─────────────┼──────────────┼───────────┼─────────┼────────┼────────┤
+│          1 │           2 │ 2009-01-01   │ Stuttgart │ Germany │   1.98 │   1.58 │
+│          2 │           4 │ 2009-01-02   │ Oslo      │ Norway  │   3.96 │   3.17 │
+│          3 │           8 │ 2009-01-03   │ Brussels  │ Belgium │   5.94 │   4.75 │
+└────────────┴─────────────┴──────────────┴───────────┴─────────┴────────┴────────┘
 ```
 
 Operators that DuckDB's SQL covers with a native form are not supported: instead of `AGGREGATE`, use `select ... group by all` (and `order by all`), instead of a `WITH` stage, put the `WITH` clause in front of the pipeline, instead of set operations with several comma-separated queries, chain the set operations, and instead of `CALL f(...)`, call the table function on a subquery: `from f((from ... |> ...))`.
@@ -177,7 +184,7 @@ The main binaries that will be built are:
 - `unittest` is the test runner of duckdb. Again, the extension is already linked into the binary.
 - `psql.duckdb_extension` is the loadable binary as it would be distributed.
 
-To run the extension code, simply start the shell with `./build/release/duckdb`.
+To run the extension code, start the shell with `./build/release/duckdb` and run `call psql_enable();`. The shell of DuckDB 2.0 sets the active grammar extensions to its own when it starts, which deactivates the built-in PSQL extension.
 
 To run the tests:
 ```sh
